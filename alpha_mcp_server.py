@@ -258,7 +258,19 @@ _TELEMETRY: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 def open_vault(db_path: str | None) -> tuple[sqlite3.Connection | None, str]:
-    target = Path(db_path or os.environ.get("ALPHA_MCP_VAULT_DB", "") or "./mcp_alpha_vault.sqlite3").expanduser().resolve()
+    explicit = db_path or os.environ.get("ALPHA_MCP_VAULT_DB", "")
+    if explicit:
+        target = Path(explicit).expanduser().resolve()
+    else:
+        candidates = (
+            Path("./mcp_alpha_vault.sqlite3"),
+            Path(__file__).resolve().parent / "mcp_alpha_vault.sqlite3",
+            HOME / "alpha-mcp" / "mcp_alpha_vault.sqlite3",
+        )
+        target = next(
+            (c.expanduser().resolve() for c in candidates if c.expanduser().exists()),
+            candidates[0].expanduser().resolve(),
+        )
     if not target.exists():
         return None, f"Vault not found at {public_path(str(target))}; run: python mcp_carbon_ingest.py ingest --roots <dir>"
     return sqlite3.connect(f"file:{target.as_posix()}?mode=ro", uri=True, timeout=3.0), ""

@@ -13,6 +13,7 @@ import argparse
 import ast
 import concurrent.futures
 import configparser
+import gzip
 import hashlib
 import json
 import mmap
@@ -29,43 +30,68 @@ import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 # --- Stage 0 Deterministic Constants ---
 MAX_FILE_BYTES = 64 * 1024 * 1024  # 64 MB ceiling for direct text read
+HTML_SLICE_MAX_BYTES = 4 * 1024 * 1024  # 4 MB ceiling for HTML text slicing
 SLICE_MAX_LINES = 160              # Carbon Stage 0 slice invariant
 
 EXCLUDED_DIRS = frozenset({
     ".git", "node_modules", ".venv", "venv", "env", "__pycache__",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
     "target", ".next", ".turbo", ".cache", ".idea", ".vscode",
+    "site-packages", "Lib", "vendor", "third_party", "bower_components",
+    ".gradle", ".cargo", "coverage", "out", ".snapshots", "obj", "installs",
 })
 
 TEXT_CODE_EXTS = frozenset({
     ".py", ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
     ".md", ".txt", ".rst", ".json", ".toml", ".yaml", ".yml",
-    ".ts", ".tsx", ".js", ".jsx", ".rs", ".go", ".sql", ".proto",
+    ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".css", ".scss",
+    ".rs", ".go", ".sql", ".sqlx", ".proto", ".c", ".cpp", ".h", ".hpp",
+    ".cs", ".lkml",
 })
 
 LINK_EXTS = frozenset({".url", ".webloc", ".desktop", ".html", ".htm"})
 
-# High-confidence credential patterns scrubbed prior to FTS indexing.
-# Order matters: ANTHROPIC_KEY (sk-ant-*) must precede generic OPENAI_KEY (sk-*).
-SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("GOOGLE_API_KEY", re.compile(r"AIza[0-9A-Za-z\-_]{35}")),
-    ("GOOGLE_OAUTH_TOKEN", re.compile(r"AQ\.Ab8[0-9A-Za-z._\-]{15,}|ya29\.[0-9A-Za-z_\-]{20,}")),
-    ("GOOGLE_OAUTH_SECRET", re.compile(r"GOCSPX-[A-Za-z0-9_\-]{18,}")),
-    ("ANTHROPIC_KEY", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
-    ("OPENAI_KEY", re.compile(r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}")),
-    ("GITHUB_TOKEN", re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,}")),
-    ("AWS_ACCESS_KEY", re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")),
-    ("SLACK_TOKEN", re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}")),
-    ("PRIVATE_KEY", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----")),
+# 13-pattern credential sieve shared with alpha_mcp_server.py prior to FTS indexing.
+SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
+    ("BEARER_TOKEN", re.compile(r"(Bearer\s+)[A-Za-z0-9._\-=/+]+", re.I), r"\1[REDACTED:BEARER_TOKEN]"),
+    ("SENTRY_TOKEN", re.compile(r"(sntrys_)[A-Za-z0-9._\-=/+]+", re.I), r"\1[REDACTED:SENTRY_TOKEN]"),
+    ("GOOGLE_API_KEY", re.compile(r"(AIza)[0-9A-Za-z._\-]{10,}"), r"\1[REDACTED:GOOGLE_API_KEY]"),
+    ("GOOGLE_OAUTH_TOKEN", re.compile(r"AQ\.Ab8[0-9A-Za-z._\-]{15,}|ya29\.[0-9A-Za-z_\-]{20,}"), "[REDACTED:GOOGLE_OAUTH_TOKEN]"),
+    ("GOOGLE_OAUTH_SECRET", re.compile(r"(GOCSPX-)[A-Za-z0-9_\-]{12,}"), r"\1[REDACTED:GOOGLE_OAUTH_SECRET]"),
+    ("ANTHROPIC_KEY", re.compile(r"(sk-ant-)[A-Za-z0-9._\-]+", re.I), r"\1[REDACTED:ANTHROPIC_KEY]"),
+    ("OPENAI_KEY", re.compile(r"\b(sk-(?:proj-|svcacct-)?)[A-Za-z0-9_\-]{20,}"), r"\1[REDACTED:OPENAI_KEY]"),
+    ("GITHUB_TOKEN", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{30,}"), "[REDACTED:GITHUB_TOKEN]"),
+    ("AWS_ACCESS_KEY", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), "[REDACTED:AWS_ACCESS_KEY]"),
+    ("SLACK_TOKEN", re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}"), "[REDACTED:SLACK_TOKEN]"),
+    ("STRIPE_KEY", re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"), "[REDACTED:STRIPE_KEY]"),
+    ("PRIVATE_KEY", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"), "[REDACTED:PRIVATE_KEY]"),
     ("ENV_SECRET", re.compile(
-        r"(?im)^([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*)(['\"]?[^\s#'\"]{8,}['\"]?)"
-    )),
+        r"(?im)^([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*[:=]\s*)(['\"]?[^\s#'\",}]{8,}['\"]?)"
+    ), r"\1[REDACTED:ENV_SECRET]"),
 )
+
+SECRET_NAMES = frozenset({
+    ".env", "id_rsa", "id_ed25519", "credentials.json",
+    "application_default_credentials.json", "mcp_oauth_tokens.json", "default.toml",
+})
+SECRET_SUFFIXES = (".pem", ".key", ".kdbx", ".p12", ".pfx")
+SECRET_HINTS = ("oauth_client", "oauth_token", "client_secret_", "service-account", "service_account")
+
+
+def is_secret_path(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        name in SECRET_NAMES
+        or name.startswith(".env.")
+        or name.endswith(SECRET_SUFFIXES)
+        or any(h in name for h in SECRET_HINTS)
+    )
 
 URL_REGEX = re.compile(r"https?://[^\s<>\"')\]`\\({}]+")
 NOTEBOOK_URL_HINTS = (
@@ -125,13 +151,10 @@ def scrub_secrets(text: str) -> tuple[str, list[SecretHit]]:
     out_lines: list[str] = []
     for idx, line in enumerate(text.splitlines(), start=1):
         scrubbed = line
-        for label, pattern in SECRET_PATTERNS:
+        for label, pattern, repl in SECRET_PATTERNS:
             if pattern.search(scrubbed):
                 hits.append(SecretHit(secret_type=label, line_number=idx))
-                if label == "ENV_SECRET":
-                    scrubbed = pattern.sub(rf"\1[REDACTED:{label}]", scrubbed)
-                else:
-                    scrubbed = pattern.sub(f"[REDACTED:{label}]", scrubbed)
+                scrubbed = pattern.sub(repl, scrubbed)
         out_lines.append(scrubbed)
     return "\n".join(out_lines), hits
 
@@ -256,6 +279,11 @@ def process_single_file(task: tuple[str, str]) -> FilePayload:
             sha256=sha256,
         )
 
+        if is_secret_path(path):
+            payload.ast_summary = "[SECRET_PATH_AIRLOCK_SKIPPED]"
+            payload.secrets = [SecretHit(secret_type="SECRET_PATH_SKIPPED", line_number=0)]
+            return payload
+
         if size_bytes == 0 or size_bytes > MAX_FILE_BYTES:
             return payload
 
@@ -268,6 +296,8 @@ def process_single_file(task: tuple[str, str]) -> FilePayload:
             scrubbed, hits = scrub_secrets(raw)
             payload.secrets = hits
             payload.links = extract_links_from_text(scrubbed, path.name)
+            if ext in (".html", ".htm") and size_bytes <= HTML_SLICE_MAX_BYTES:
+                payload.slices = slice_text_160(scrubbed)
             return payload
 
         if ext == ".ipynb":
@@ -505,6 +535,7 @@ def init_vault_db(db_path: Path) -> tuple[sqlite3.Connection, bool]:
             context TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_links_cat ON links(category);
+        CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_path);
 
         CREATE TABLE IF NOT EXISTS secret_audit (
             id INTEGER PRIMARY KEY,
@@ -512,6 +543,7 @@ def init_vault_db(db_path: Path) -> tuple[sqlite3.Connection, bool]:
             secret_type TEXT NOT NULL,
             line_number INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_secret_audit_source ON secret_audit(source_path);
 
         CREATE TABLE IF NOT EXISTS vhdx_manifest (
             id INTEGER PRIMARY KEY,
@@ -530,6 +562,26 @@ def init_vault_db(db_path: Path) -> tuple[sqlite3.Connection, bool]:
             compressed_size INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_zip_manifest_path ON zip_manifest(zip_path);
+
+        CREATE TABLE IF NOT EXISTS ingest_telemetry (
+            id INTEGER PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            folder_root TEXT NOT NULL,
+            candidate_files INTEGER NOT NULL,
+            indexed_files INTEGER NOT NULL,
+            dedup_files INTEGER NOT NULL,
+            binary_skipped INTEGER NOT NULL,
+            parseable_bytes INTEGER NOT NULL,
+            slices_count INTEGER NOT NULL,
+            links_count INTEGER NOT NULL,
+            secrets_redacted INTEGER NOT NULL,
+            elapsed_ms REAL NOT NULL,
+            files_per_sec REAL NOT NULL,
+            mb_per_sec REAL NOT NULL,
+            coverage_pct REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ingest_telemetry_run ON ingest_telemetry(run_id);
     """)
 
     fts_enabled = True
@@ -561,17 +613,41 @@ def init_vault_db(db_path: Path) -> tuple[sqlite3.Connection, bool]:
     return conn, fts_enabled
 
 
-def walk_candidate_files(
+def resolve_root_labels(roots: list[Path]) -> list[tuple[Path, str]]:
+    """Assign unique folder_root labels, prefixing parent directory when basenames collide."""
+    counts: dict[str, int] = {}
+    for root in roots:
+        counts[root.name] = counts.get(root.name, 0) + 1
+    labeled: list[tuple[Path, str]] = []
+    used: set[str] = set()
+    for root in roots:
+        label = root.name if counts.get(root.name, 0) <= 1 else f"{root.parent.name}/{root.name}"
+        if label in used:
+            suffix = 2
+            while f"{label}#{suffix}" in used:
+                suffix += 1
+            label = f"{label}#{suffix}"
+        used.add(label)
+        labeled.append((root, label))
+    return labeled
+
+
+def walk_candidate_inventory(
     roots: Iterable[Path],
-) -> tuple[list[tuple[str, str]], list[Path], list[tuple[Path, str]]]:
+) -> tuple[list[tuple[str, str]], list[Path], list[tuple[Path, str]], dict[str, dict[str, int]]]:
     tasks: list[tuple[str, str]] = []
     vhdx_list: list[Path] = []
     zip_list: list[tuple[Path, str]] = []
-    for root in roots:
+    inventory: dict[str, dict[str, int]] = {}
+    resolved_roots = [Path(r).resolve() for r in roots]
+    for root, root_label in resolve_root_labels(resolved_roots):
         if not root.exists():
             print(f"[WARN] Root not found, skipping: {root}", file=sys.stderr)
             continue
-        root_label = root.name
+        stats = inventory.setdefault(
+            root_label,
+            {"candidate_files": 0, "binary_skipped": 0, "zip_archives": 0, "vhdx_archives": 0},
+        )
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in sorted(dirnames) if d not in EXCLUDED_DIRS]
             for fname in sorted(filenames):
@@ -579,32 +655,52 @@ def walk_candidate_files(
                 ext = fpath.suffix.lower()
                 if ext == ".vhdx":
                     vhdx_list.append(fpath)
+                    stats["vhdx_archives"] += 1
                 elif ext == ".zip":
                     zip_list.append((fpath, root_label))
-                elif ext in TEXT_CODE_EXTS or ext in LINK_EXTS or ext == ".ipynb":
+                    stats["zip_archives"] += 1
+                elif ext in TEXT_CODE_EXTS or ext in LINK_EXTS or ext == ".ipynb" or is_secret_path(fpath):
                     tasks.append((str(fpath), root_label))
+                    stats["candidate_files"] += 1
+                else:
+                    stats["binary_skipped"] += 1
+    return tasks, vhdx_list, zip_list, inventory
+
+
+def walk_candidate_files(
+    roots: Iterable[Path],
+) -> tuple[list[tuple[str, str]], list[Path], list[tuple[Path, str]]]:
+    tasks, vhdx_list, zip_list, _ = walk_candidate_inventory(roots)
     return tasks, vhdx_list, zip_list
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
     t0 = time.perf_counter()
+    run_id = hashlib.sha256(f"{time.time_ns()}:{','.join(args.roots)}".encode("utf-8")).hexdigest()[:16]
+    recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     db_path = Path(args.db).resolve()
     roots = [Path(r).resolve() for r in args.roots]
     extract_dir = Path(args.extract_dir).resolve()
 
     conn, fts_enabled = init_vault_db(db_path)
-    tasks, vhdx_files, zip_files = walk_candidate_files(roots)
+    tasks, vhdx_files, zip_files, inventory = walk_candidate_inventory(roots)
 
     vhdx_count, extra_roots = handle_vhdx_archives(vhdx_files, args.vhdx_mode, extract_dir, conn)
     zip_count = handle_zip_archives(zip_files, conn)
     if extra_roots:
-        extra_tasks, _, extra_zips = walk_candidate_files(extra_roots)
+        extra_tasks, _, extra_zips, extra_inv = walk_candidate_inventory(extra_roots)
         tasks.extend(extra_tasks)
         zip_count += handle_zip_archives(extra_zips, conn)
+        for k, v in extra_inv.items():
+            dst = inventory.setdefault(k, {"candidate_files": 0, "binary_skipped": 0, "zip_archives": 0, "vhdx_archives": 0})
+            for mk, mv in v.items():
+                dst[mk] += mv
 
-    seen_hashes: set[str] = {
-        row[0] for row in conn.execute("SELECT DISTINCT sha256 FROM files WHERE sha256 != ''")
-    }
+    canonical_by_hash: dict[str, str] = {}
+    for sha_val, fpath_val in conn.execute("SELECT sha256, path FROM files WHERE sha256 != '' AND is_duplicate = 0"):
+        if Path(fpath_val).exists():
+            canonical_by_hash[sha_val] = fpath_val
+    existing_paths: set[str] = {row[0] for row in conn.execute("SELECT path FROM files")}
 
     workers = args.workers or max(2, (os.cpu_count() or 4) - 1)
     indexed_files = 0
@@ -612,6 +708,23 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     total_slices = 0
     total_links = 0
     total_secrets = 0
+    slice_table = "slices_fts" if fts_enabled else "slices_fallback"
+
+    root_metrics: dict[str, dict[str, Any]] = {
+        label: {
+            "candidate_files": inv["candidate_files"],
+            "binary_skipped": inv["binary_skipped"],
+            "indexed_files": 0,
+            "dedup_files": 0,
+            "parseable_bytes": 0,
+            "slices_count": 0,
+            "links_count": 0,
+            "secrets_redacted": 0,
+            "t_start": None,
+            "t_end": None,
+        }
+        for label, inv in inventory.items()
+    }
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
         with conn:
@@ -619,7 +732,38 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 if payload.error:
                     print(f"[WARN] Skipped {payload.path}: {payload.error}", file=sys.stderr)
                     continue
-                is_dup = payload.sha256 in seen_hashes and payload.sha256 != ""
+                now_ts = time.perf_counter()
+                rm = root_metrics.setdefault(
+                    payload.folder_root,
+                    {
+                        "candidate_files": 0,
+                        "binary_skipped": 0,
+                        "indexed_files": 0,
+                        "dedup_files": 0,
+                        "parseable_bytes": 0,
+                        "slices_count": 0,
+                        "links_count": 0,
+                        "secrets_redacted": 0,
+                        "t_start": None,
+                        "t_end": None,
+                    },
+                )
+                if rm["t_start"] is None:
+                    rm["t_start"] = now_ts
+                rm["t_end"] = now_ts
+
+                if payload.path in existing_paths:
+                    conn.execute(f"DELETE FROM {slice_table} WHERE path = ?", (payload.path,))
+                existing_paths.add(payload.path)
+
+                if payload.sha256:
+                    owner = canonical_by_hash.get(payload.sha256)
+                    is_dup = owner is not None and owner != payload.path
+                    if not is_dup:
+                        canonical_by_hash[payload.sha256] = payload.path
+                else:
+                    is_dup = False
+
                 conn.execute(
                     """INSERT OR REPLACE INTO files
                        (sha256, path, folder_root, ext, size_bytes, ast_summary, is_duplicate)
@@ -630,6 +774,8 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                     ),
                 )
                 indexed_files += 1
+                rm["indexed_files"] += 1
+                rm["parseable_bytes"] += payload.size_bytes
 
                 conn.execute("DELETE FROM secret_audit WHERE source_path = ?", (payload.path,))
                 if payload.secrets:
@@ -638,6 +784,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                         [(payload.path, s.secret_type, s.line_number) for s in payload.secrets],
                     )
                     total_secrets += len(payload.secrets)
+                    rm["secrets_redacted"] += len(payload.secrets)
 
                 conn.execute("DELETE FROM links WHERE source_path = ?", (payload.path,))
                 if payload.links:
@@ -646,18 +793,16 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                         [(payload.path, l.url, l.category, l.context) for l in payload.links],
                     )
                     total_links += len(payload.links)
+                    rm["links_count"] += len(payload.links)
 
                 if is_dup:
                     dedup_skipped += 1
+                    rm["dedup_files"] += 1
                     continue
 
-                if payload.sha256:
-                    seen_hashes.add(payload.sha256)
-
                 if payload.slices:
-                    table = "slices_fts" if fts_enabled else "slices_fallback"
                     conn.executemany(
-                        f"INSERT INTO {table} (path, folder_root, chunk_index, line_range, ast_summary, content) VALUES (?, ?, ?, ?, ?, ?)",
+                        f"INSERT INTO {slice_table} (path, folder_root, chunk_index, line_range, ast_summary, content) VALUES (?, ?, ?, ?, ?, ?)",
                         [
                             (
                                 payload.path, payload.folder_root, c_idx, f"L{l_start}-L{l_end}",
@@ -667,8 +812,37 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                         ],
                     )
                     total_slices += len(payload.slices)
+                    rm["slices_count"] += len(payload.slices)
 
     elapsed = time.perf_counter() - t0
+    with conn:
+        for label, rm in root_metrics.items():
+            cand = rm["candidate_files"]
+            idx_n = rm["indexed_files"]
+            span_s = max((rm["t_end"] - rm["t_start"]) if (rm["t_start"] is not None and rm["t_end"] is not None) else elapsed, 0.005)
+            elapsed_ms = round(span_s * 1000.0, 2)
+            fps = round(idx_n / span_s, 2) if idx_n else 0.0
+            mb = rm["parseable_bytes"] / (1024 * 1024)
+            mbps = round(mb / span_s, 2) if mb > 0 else 0.0
+            cov_pct = round(100.0 * idx_n / cand, 2) if cand else 100.0
+            conn.execute(
+                """INSERT INTO ingest_telemetry (
+                       run_id, recorded_at, folder_root, candidate_files, indexed_files,
+                       dedup_files, binary_skipped, parseable_bytes, slices_count,
+                       links_count, secrets_redacted, elapsed_ms, files_per_sec,
+                       mb_per_sec, coverage_pct
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id, recorded_at, label, cand, idx_n, rm["dedup_files"],
+                    rm["binary_skipped"], rm["parseable_bytes"], rm["slices_count"],
+                    rm["links_count"], rm["secrets_redacted"], elapsed_ms, fps, mbps, cov_pct,
+                ),
+            )
+            print(
+                f"[ROOT_GAUGE] root={label} indexed={idx_n}/{cand} coverage={cov_pct:.2f}% "
+                f"dedup={rm['dedup_files']} slices={rm['slices_count']} mb={mb:.2f} rate={mbps:.2f}MB/s"
+            )
+
     vault_hash = hashlib.sha256(f"{indexed_files}:{total_slices}:{total_links}:{total_secrets}".encode()).hexdigest()[:16]
 
     # Stage 0 Compact Telemetry Receipt (< 300 tokens)
@@ -773,18 +947,25 @@ def mint_gcp_bearer_token(impersonate_sa: str = "") -> tuple[str, str]:
 class GcpRest:
     """Minimal stdlib REST client for Cloud Storage and BigQuery using a Bearer token."""
 
+    CLUSTERING_FIELDS: dict[str, list[str]] = {
+        "files": ["folder_root", "ext"],
+        "slices_redacted": ["folder_root", "path"],
+        "links": ["category"],
+        "ingest_telemetry": ["folder_root"],
+    }
+
     def __init__(self, token: str, project: str) -> None:
         self._headers = {"Authorization": f"Bearer {token}", "X-Goog-User-Project": project}
         self.project = project
 
     def call(self, method: str, url: str, body: bytes | None = None, content_type: str = "application/json",
-             ok_404: bool = False) -> dict | None:
+             ok_404: bool = False, timeout: int = 120) -> dict | None:
         headers = dict(self._headers)
         if body is not None:
             headers["Content-Type"] = content_type
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
@@ -802,11 +983,11 @@ class GcpRest:
         self.call("POST", f"https://storage.googleapis.com/storage/v1/b?project={q(self.project, safe='')}",
                   json.dumps(spec).encode("utf-8"))
 
-    def upload_object(self, bucket: str, name: str, data: bytes) -> None:
+    def upload_object(self, bucket: str, name: str, data: bytes, content_type: str = "application/json") -> None:
         q = urllib.parse.quote
         self.call("POST",
                   f"https://storage.googleapis.com/upload/storage/v1/b/{q(bucket, safe='')}/o?uploadType=media&name={q(name, safe='')}",
-                  data, content_type="application/json")
+                  data, content_type=content_type, timeout=300)
 
     def ensure_dataset(self, dataset: str, location: str) -> None:
         q = urllib.parse.quote
@@ -816,21 +997,38 @@ class GcpRest:
         spec = {"datasetReference": {"projectId": self.project, "datasetId": dataset}, "location": location}
         self.call("POST", base, json.dumps(spec).encode("utf-8"))
 
-    def load_table(self, bucket: str, prefix: str, dataset: str, table: str, location: str) -> None:
+    def load_table(self, bucket: str, prefix: str, dataset: str, table: str, location: str,
+                   object_ext: str = ".jsonl") -> None:
         q = urllib.parse.quote
+        table_url = (
+            f"https://bigquery.googleapis.com/bigquery/v2/projects/{q(self.project, safe='')}"
+            f"/datasets/{q(dataset, safe='')}/tables/{q(table, safe='')}"
+        )
+        cluster_fields = self.CLUSTERING_FIELDS.get(table)
+        write_disp = "WRITE_APPEND" if table == "ingest_telemetry" else "WRITE_TRUNCATE"
+        if write_disp == "WRITE_TRUNCATE" and cluster_fields:
+            existing = self.call("GET", table_url, ok_404=True)
+            if existing is not None:
+                cur_fields = (existing.get("clustering") or {}).get("fields") or []
+                if list(cur_fields) != list(cluster_fields):
+                    self.call("DELETE", table_url, ok_404=True)
+
         jobs = f"https://bigquery.googleapis.com/bigquery/v2/projects/{q(self.project, safe='')}/jobs"
-        src = f"gs://{bucket}/{prefix}/{table}.jsonl" if prefix else f"gs://{bucket}/{table}.jsonl"
-        spec = {
-            "jobReference": {"projectId": self.project, "location": location},
-            "configuration": {"load": {
-                "sourceUris": [src],
-                "destinationTable": {"projectId": self.project, "datasetId": dataset, "tableId": table},
-                "sourceFormat": "NEWLINE_DELIMITED_JSON", "autodetect": True, "writeDisposition": "WRITE_TRUNCATE",
-            }},
+        fname = f"{table}{object_ext}"
+        src = f"gs://{bucket}/{prefix}/{fname}" if prefix else f"gs://{bucket}/{fname}"
+        load_cfg: dict[str, Any] = {
+            "sourceUris": [src],
+            "destinationTable": {"projectId": self.project, "datasetId": dataset, "tableId": table},
+            "sourceFormat": "NEWLINE_DELIMITED_JSON",
+            "autodetect": True,
+            "writeDisposition": write_disp,
         }
+        if cluster_fields:
+            load_cfg["clustering"] = {"fields": cluster_fields}
+        spec = {"jobReference": {"projectId": self.project, "location": location}, "configuration": {"load": load_cfg}}
         job = self.call("POST", jobs, json.dumps(spec).encode("utf-8")) or {}
         job_id = job["jobReference"]["jobId"]
-        for _ in range(90):
+        for _ in range(150):
             st = self.call("GET", f"{jobs}/{q(job_id, safe='')}?location={q(location, safe='')}") or {}
             status = st.get("status", {})
             if status.get("state") == "DONE":
@@ -840,10 +1038,13 @@ class GcpRest:
             time.sleep(2)
         raise RuntimeError(f"BigQuery load {table} timed out")
 
-    def count_rows(self, dataset: str, table: str, location: str) -> int:
+    def count_rows(self, dataset: str, table: str, location: str, run_id: str | None = None) -> int:
         q = urllib.parse.quote
         url = f"https://bigquery.googleapis.com/bigquery/v2/projects/{q(self.project, safe='')}/queries"
         sql = f"SELECT COUNT(*) AS n FROM `{self.project}.{dataset}.{table}`"
+        if run_id and table == "ingest_telemetry":
+            safe_rid = run_id.replace("'", "")
+            sql += f" WHERE run_id = '{safe_rid}'"
         res = self.call("POST", url, json.dumps({"query": sql, "useLegacySql": False, "location": location}).encode("utf-8")) or {}
         return int(res["rows"][0]["f"][0]["v"])
 
@@ -864,12 +1065,13 @@ def cmd_sync(args: argparse.Namespace) -> None:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         slice_table = "slices_fts" if "slices_fts" in tables else ("slices_fallback" if "slices_fallback" in tables else "")
 
-        hard_patterns = [p for p in SECRET_PATTERNS if p[0] != "ENV_SECRET"]
+        hard_patterns = [(lbl, pat) for lbl, pat, _repl in SECRET_PATTERNS if lbl != "ENV_SECRET"]
         raw_secret_hits = 0
         slice_records: list[dict] = []
         if slice_table:
             for row in conn.execute(f"SELECT path, folder_root, chunk_index, line_range, ast_summary, content FROM {slice_table}"):
-                content_str = str(row[5] or "")
+                content_str, _ = scrub_secrets(str(row[5] or ""))
+                ast_clean, _ = scrub_secrets(str(row[4] or ""))
                 for _label, pat in hard_patterns:
                     for m in pat.finditer(content_str):
                         matched = m.group(0)
@@ -879,7 +1081,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
                 slice_records.append({
                     "path": _normalize_export_path(row[0]), "folder_root": str(row[1] or ""),
                     "chunk_index": int(row[2]) if str(row[2]).isdigit() else 0,
-                    "line_range": str(row[3] or ""), "ast_summary": str(row[4] or ""), "content": content_str,
+                    "line_range": str(row[3] or ""), "ast_summary": ast_clean, "content": content_str,
                 })
         if raw_secret_hits > 0:
             print(f"[SYNC_ABORTED_SECURITY] {raw_secret_hits} unredacted secret pattern(s) in vault slices; refusing cloud export.", file=sys.stderr)
@@ -889,7 +1091,7 @@ def cmd_sync(args: argparse.Namespace) -> None:
             return list(conn.execute(sql)) if present in tables else []
 
         file_records = [{"sha256": str(r[0]), "path": _normalize_export_path(r[1]), "folder_root": str(r[2]), "ext": str(r[3]),
-                         "size_bytes": int(r[4] or 0), "ast_summary": str(r[5] or ""), "is_duplicate": bool(r[6])}
+                         "size_bytes": int(r[4] or 0), "ast_summary": scrub_secrets(str(r[5] or ""))[0], "is_duplicate": bool(r[6])}
                         for r in _rows("SELECT sha256, path, folder_root, ext, size_bytes, ast_summary, is_duplicate FROM files", "files")]
         link_records = [{"source_path": _normalize_export_path(r[0]), "url": str(r[1]), "category": str(r[2]), "context": str(r[3] or "")}
                         for r in _rows("SELECT source_path, url, category, context FROM links", "links")]
@@ -900,12 +1102,40 @@ def cmd_sync(args: argparse.Namespace) -> None:
                        for r in _rows("SELECT zip_path, folder_root, entry_path, entry_size, compressed_size FROM zip_manifest", "zip_manifest")]
         audit_records = [{"source_path": _normalize_export_path(r[0]), "secret_type": str(r[1]), "line_number": int(r[2] or 0)}
                          for r in _rows("SELECT source_path, secret_type, line_number FROM secret_audit", "secret_audit")]
+        telemetry_records = [
+            {
+                "run_id": str(r[0]), "recorded_at": str(r[1]), "folder_root": str(r[2]),
+                "candidate_files": int(r[3] or 0), "indexed_files": int(r[4] or 0),
+                "dedup_files": int(r[5] or 0), "binary_skipped": int(r[6] or 0),
+                "parseable_bytes": int(r[7] or 0), "slices_count": int(r[8] or 0),
+                "links_count": int(r[9] or 0), "secrets_redacted": int(r[10] or 0),
+                "elapsed_ms": float(r[11] or 0.0), "files_per_sec": float(r[12] or 0.0),
+                "mb_per_sec": float(r[13] or 0.0), "coverage_pct": float(r[14] or 0.0),
+            }
+            for r in _rows(
+                """SELECT run_id, recorded_at, folder_root, candidate_files, indexed_files,
+                          dedup_files, binary_skipped, parseable_bytes, slices_count,
+                          links_count, secrets_redacted, elapsed_ms, files_per_sec,
+                          mb_per_sec, coverage_pct
+                   FROM ingest_telemetry
+                   WHERE run_id = (SELECT run_id FROM ingest_telemetry ORDER BY id DESC LIMIT 1)""",
+                "ingest_telemetry",
+            )
+        ]
     finally:
         conn.close()
 
+    latest_run_id = telemetry_records[-1]["run_id"] if telemetry_records else None
     parity = hashlib.sha256(f"{len(file_records)}:{len(slice_records)}:{len(link_records)}:{len(audit_records)}".encode("utf-8")).hexdigest()[:16]
-    payloads = {"files": file_records, "slices_redacted": slice_records, "links": link_records,
-                "vhdx_manifest": vhdx_records, "zip_manifest": zip_records, "secret_audit": audit_records}
+    payloads = {
+        "files": file_records,
+        "slices_redacted": slice_records,
+        "links": link_records,
+        "vhdx_manifest": vhdx_records,
+        "zip_manifest": zip_records,
+        "secret_audit": audit_records,
+        "ingest_telemetry": telemetry_records,
+    }
     prefix = args.prefix.strip("/")
     gcs_uri = f"gs://{args.bucket}/{prefix}" if prefix else f"gs://{args.bucket}"
 
@@ -913,22 +1143,30 @@ def cmd_sync(args: argparse.Namespace) -> None:
         stage = Path(tmp)
         table_meta: dict[str, dict] = {}
         total_bytes = 0
+        total_gz_bytes = 0
         for tname, recs in payloads.items():
-            out = stage / f"{tname}.jsonl"
-            with out.open("w", encoding="utf-8", newline="\n") as fh:
+            out_gz = stage / f"{tname}.jsonl.gz"
+            raw_hash = hashlib.sha256()
+            raw_size = 0
+            with gzip.open(out_gz, "wt", encoding="utf-8", newline="\n", compresslevel=6) as fh:
                 for rec in recs:
-                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            size = out.stat().st_size
-            table_meta[tname] = {"rows": len(recs), "bytes": size, "sha256": hashlib.sha256(out.read_bytes()).hexdigest()[:16]}
-            total_bytes += size
-        manifest = {"schema": "alpha_mcp.stage0_gcp_sync.v1", "vault_name": db_path.name, "parity_sha256": parity,
+                    line = json.dumps(rec, ensure_ascii=False) + "\n"
+                    enc = line.encode("utf-8")
+                    raw_hash.update(enc)
+                    raw_size += len(enc)
+                    fh.write(line)
+            gz_size = out_gz.stat().st_size
+            table_meta[tname] = {"rows": len(recs), "bytes": raw_size, "gz_bytes": gz_size, "sha256": raw_hash.hexdigest()[:16]}
+            total_bytes += raw_size
+            total_gz_bytes += gz_size
+        manifest = {"schema": "alpha_mcp.stage0_gcp_sync.v2", "vault_name": db_path.name, "parity_sha256": parity,
                     "project": project, "location": args.location, "gcs_uri": gcs_uri,
                     "bigquery_dataset": f"{project}.{args.dataset}", "unredacted_secret_hits": 0,
                     "auth_transport": "rest_bearer_token", "tables": table_meta}
         (stage / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
         if not args.apply:
-            print(f"[SYNC_DRY_RUN] parity={parity} bytes={total_bytes} elapsed={time.perf_counter() - t0:.2f}s")
+            print(f"[SYNC_DRY_RUN] parity={parity} raw_bytes={total_bytes} gz_bytes={total_gz_bytes} elapsed={time.perf_counter() - t0:.2f}s")
             print(f"[DESTINATIONS] gcs={gcs_uri} bq={project}.{args.dataset} location={args.location}")
             print("[TABLES] " + " ".join(f"{k}={v['rows']}" for k, v in table_meta.items()))
             print("[GUARDRAILS] unredacted_secrets=0 binaries_excluded=True status=DRY_RUN_VERIFIED")
@@ -938,7 +1176,8 @@ def cmd_sync(args: argparse.Namespace) -> None:
         gcp = GcpRest(token, project)
         gcp.ensure_bucket(args.bucket, args.location)
         for tname in payloads:
-            gcp.upload_object(args.bucket, f"{prefix}/{tname}.jsonl" if prefix else f"{tname}.jsonl", (stage / f"{tname}.jsonl").read_bytes())
+            obj_name = f"{prefix}/{tname}.jsonl.gz" if prefix else f"{tname}.jsonl.gz"
+            gcp.upload_object(args.bucket, obj_name, (stage / f"{tname}.jsonl.gz").read_bytes(), content_type="application/gzip")
         gcp.upload_object(args.bucket, f"{prefix}/manifest.json" if prefix else "manifest.json", (stage / "manifest.json").read_bytes())
 
         verified: list[str] = []
@@ -947,12 +1186,12 @@ def cmd_sync(args: argparse.Namespace) -> None:
             for tname, meta in table_meta.items():
                 if meta["rows"] == 0:
                     continue
-                gcp.load_table(args.bucket, prefix, args.dataset, tname, args.location)
-                n = gcp.count_rows(args.dataset, tname, args.location)
+                gcp.load_table(args.bucket, prefix, args.dataset, tname, args.location, object_ext=".jsonl.gz")
+                n = gcp.count_rows(args.dataset, tname, args.location, run_id=latest_run_id)
                 if n != meta["rows"]:
                     raise RuntimeError(f"Row-count mismatch on {tname}: local={meta['rows']} bigquery={n}")
                 verified.append(f"{tname}:{n}")
-        print(f"[SYNC_APPLIED] parity={parity} bytes={total_bytes} auth={source} elapsed={time.perf_counter() - t0:.2f}s")
+        print(f"[SYNC_APPLIED] parity={parity} raw_bytes={total_bytes} gz_bytes={total_gz_bytes} auth={source} elapsed={time.perf_counter() - t0:.2f}s")
         print(f"[DESTINATIONS] gcs={gcs_uri}/ bq={project}.{args.dataset} verified=[{', '.join(verified)}]")
         print("[GUARDRAILS] unredacted_secrets=0 binaries_excluded=True status=SYNC_COMMITTED")
 

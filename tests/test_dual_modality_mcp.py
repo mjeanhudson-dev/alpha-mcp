@@ -604,5 +604,78 @@ class TestStreamableHTTPAndOAuthE2E(unittest.TestCase):
             t.join(timeout=3)
 
 
+class TestCarbonIngestV21(unittest.TestCase):
+    def test_idempotent_reingest_secret_airlock_and_telemetry(self) -> None:
+        import mcp_carbon_ingest as ingest_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sample_repo"
+            root.mkdir(parents=True)
+            (root / "app.py").write_text("def hello(name):\n    return f'hi {name}'\n", encoding="utf-8")
+            (root / "page.html").write_text(
+                "<html><body><h1>Portal</h1><a href='https://example.org/docs'>Docs</a></body></html>\n",
+                encoding="utf-8",
+            )
+            (root / ".env").write_text("SERVICE_TOKEN=super_secret_token_value_123456\n", encoding="utf-8")
+            (root / "notes.md").write_text("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test.payload\n", encoding="utf-8")
+            db_path = Path(tmp) / "vault.sqlite3"
+
+            for _ in range(2):
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(REPO_ROOT / "mcp_carbon_ingest.py"),
+                        "ingest",
+                        "--roots",
+                        str(root),
+                        "--db",
+                        str(db_path),
+                        "--workers",
+                        "1",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=True,
+                )
+                self.assertIn("[ROOT_GAUGE]", proc.stdout)
+
+            conn = ingest_mod.sqlite3.connect(str(db_path))
+            try:
+                files = conn.execute("SELECT path, ast_summary, is_duplicate FROM files ORDER BY path").fetchall()
+                dup_flags = {Path(p).name: dup for p, _, dup in files}
+                self.assertEqual(dup_flags["app.py"], 0)
+                self.assertEqual(dup_flags["page.html"], 0)
+                self.assertEqual(dup_flags[".env"], 0)
+                self.assertEqual(dup_flags["notes.md"], 0)
+                asts = {Path(p).name: a for p, a, _ in files}
+                self.assertEqual(asts[".env"], "[SECRET_PATH_AIRLOCK_SKIPPED]")
+
+                slices = conn.execute("SELECT path, content FROM slices_fts").fetchall()
+                slice_names = [Path(p).name for p, _ in slices]
+                self.assertEqual(slice_names.count("app.py"), 1)
+                self.assertEqual(slice_names.count("page.html"), 1)
+                self.assertEqual(slice_names.count(".env"), 0)
+                joined_content = "\n".join(c for _, c in slices)
+                self.assertNotIn("super_secret_token_value", joined_content)
+                self.assertNotIn("eyJhbGci", joined_content)
+
+                audit_types = {r[0] for r in conn.execute("SELECT secret_type FROM secret_audit").fetchall()}
+                self.assertIn("SECRET_PATH_SKIPPED", audit_types)
+                self.assertIn("BEARER_TOKEN", audit_types)
+
+                telem = conn.execute(
+                    "SELECT folder_root, candidate_files, indexed_files, coverage_pct, mb_per_sec FROM ingest_telemetry"
+                ).fetchall()
+                self.assertEqual(len(telem), 2)
+                self.assertEqual(telem[-1][0], "sample_repo")
+                self.assertEqual(telem[-1][1], 4)
+                self.assertEqual(telem[-1][2], 4)
+                self.assertEqual(telem[-1][3], 100.0)
+                self.assertGreater(telem[-1][4], 0.0)
+            finally:
+                conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
