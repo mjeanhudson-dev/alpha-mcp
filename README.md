@@ -101,3 +101,17 @@ In addition to the 6-file quick-start fixture, `mcp_carbon_ingest.py` was benchm
 
 - **Zero Raw Secrets & Zero OS Path Leakage:** All tracked files are verified with `--strict-agnostic` pre-push checks confirming zero credentials, zero local OS usernames, zero hardcoded absolute home paths (normalized to `~/`), and valid GFM tables.
 - **Quarantined Binaries Stay Local:** `.sqlite3*` vaults, `.vhdx` disk images, `.pdf` bundles, `.zip` backups, `.pkl` pickles, and raw files flagged by `secret_audit` are excluded by `.gitignore` and never committed to public repositories.
+
+## Cloud sync (optional): Cloud Storage + BigQuery over REST
+
+`sync` exports the redacted vault (never raw files) to your own Cloud Storage bucket and BigQuery dataset using plain HTTPS and a short-lived Bearer token. No `gsutil`/`bq` CLI and no downloaded key file are needed.
+
+```bash
+export GOOGLE_CLOUD_PROJECT=<your-project-id>
+# Keyless: let your gcloud login impersonate a worker service account
+python mcp_carbon_ingest.py sync --target gcp --db ./mcp_alpha_vault.sqlite3 \
+  --bucket <your-bucket> --impersonate-sa <worker>@<your-project-id>.iam.gserviceaccount.com   # dry-run
+python mcp_carbon_ingest.py sync ... --apply                                                    # execute
+```
+
+The worker needs `storage.admin`, `bigquery.dataEditor`, `bigquery.jobUser` and `serviceusage.serviceUsageConsumer` on the project; your user needs `iam.serviceAccountTokenCreator` on the worker. A token can also be supplied via `GOOGLE_OAUTH_ACCESS_TOKEN`. The sync aborts if any unredacted secret is found, and verifies BigQuery row counts after loading.

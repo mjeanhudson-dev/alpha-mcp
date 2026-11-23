@@ -22,7 +22,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +55,7 @@ LINK_EXTS = frozenset({".url", ".webloc", ".desktop", ".html", ".htm"})
 SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("GOOGLE_API_KEY", re.compile(r"AIza[0-9A-Za-z\-_]{35}")),
     ("GOOGLE_OAUTH_TOKEN", re.compile(r"AQ\.Ab8[0-9A-Za-z._\-]{15,}|ya29\.[0-9A-Za-z_\-]{20,}")),
+    ("GOOGLE_OAUTH_SECRET", re.compile(r"GOCSPX-[A-Za-z0-9_\-]{18,}")),
     ("ANTHROPIC_KEY", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
     ("OPENAI_KEY", re.compile(r"sk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{20,}")),
     ("GITHUB_TOKEN", re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,}")),
@@ -733,6 +738,225 @@ def cmd_audit(args: argparse.Namespace) -> None:
             print(f"  [{Path(zpath).name}] {cnt} files ({total_sz / (1024 * 1024):.2f} MB uncompressed)")
 
 
+def _normalize_export_path(raw_path: str) -> str:
+    home_str = str(Path.home())
+    text = str(raw_path or "")
+    if text.lower().startswith(home_str.lower()):
+        return "~" + text[len(home_str):].replace("\\", "/")
+    return text.replace("\\", "/")
+
+
+def mint_gcp_bearer_token(impersonate_sa: str = "") -> tuple[str, str]:
+    """Return (bearer_token, source). Token lives in RAM only; never printed or written to disk.
+
+    Order: GOOGLE_OAUTH_ACCESS_TOKEN env -> gcloud impersonating a service account (keyless) -> gcloud default login.
+    """
+    env_tok = os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+    if env_tok:
+        return env_tok, "env_access_token"
+    sa = (impersonate_sa or os.environ.get("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", "")).strip()
+    gcloud_exe = shutil.which("gcloud.cmd") or shutil.which("gcloud")
+    if not gcloud_exe:
+        raise RuntimeError("gcloud CLI not found; set GOOGLE_OAUTH_ACCESS_TOKEN or install the Google Cloud SDK.")
+    cmd = [gcloud_exe, "auth", "print-access-token"]
+    if sa:
+        cmd.append(f"--impersonate-service-account={sa}")
+    env = os.environ.copy()
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=env, timeout=40, check=False)
+    tok = proc.stdout.strip()
+    if proc.returncode != 0 or len(tok) < 20:
+        raise RuntimeError(f"token mint failed (exit={proc.returncode}): {(proc.stderr or '').strip()[-300:]}")
+    return tok, ("impersonated_service_account" if sa else "gcloud_default_login")
+
+
+class GcpRest:
+    """Minimal stdlib REST client for Cloud Storage and BigQuery using a Bearer token."""
+
+    def __init__(self, token: str, project: str) -> None:
+        self._headers = {"Authorization": f"Bearer {token}", "X-Goog-User-Project": project}
+        self.project = project
+
+    def call(self, method: str, url: str, body: bytes | None = None, content_type: str = "application/json",
+             ok_404: bool = False) -> dict | None:
+        headers = dict(self._headers)
+        if body is not None:
+            headers["Content-Type"] = content_type
+        req = urllib.request.Request(url, data=body, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read()
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and ok_404:
+                return None
+            detail = exc.read().decode("utf-8", errors="replace")[:400]
+            raise RuntimeError(f"{method} {url.split('?')[0]} -> HTTP {exc.code}: {detail}") from None
+
+    def ensure_bucket(self, bucket: str, location: str) -> None:
+        q = urllib.parse.quote
+        if self.call("GET", f"https://storage.googleapis.com/storage/v1/b/{q(bucket, safe='')}", ok_404=True) is not None:
+            return
+        spec = {"name": bucket, "location": location, "storageClass": "STANDARD",
+                "iamConfiguration": {"uniformBucketLevelAccess": {"enabled": True}}}
+        self.call("POST", f"https://storage.googleapis.com/storage/v1/b?project={q(self.project, safe='')}",
+                  json.dumps(spec).encode("utf-8"))
+
+    def upload_object(self, bucket: str, name: str, data: bytes) -> None:
+        q = urllib.parse.quote
+        self.call("POST",
+                  f"https://storage.googleapis.com/upload/storage/v1/b/{q(bucket, safe='')}/o?uploadType=media&name={q(name, safe='')}",
+                  data, content_type="application/json")
+
+    def ensure_dataset(self, dataset: str, location: str) -> None:
+        q = urllib.parse.quote
+        base = f"https://bigquery.googleapis.com/bigquery/v2/projects/{q(self.project, safe='')}/datasets"
+        if self.call("GET", f"{base}/{q(dataset, safe='')}", ok_404=True) is not None:
+            return
+        spec = {"datasetReference": {"projectId": self.project, "datasetId": dataset}, "location": location}
+        self.call("POST", base, json.dumps(spec).encode("utf-8"))
+
+    def load_table(self, bucket: str, prefix: str, dataset: str, table: str, location: str) -> None:
+        q = urllib.parse.quote
+        jobs = f"https://bigquery.googleapis.com/bigquery/v2/projects/{q(self.project, safe='')}/jobs"
+        src = f"gs://{bucket}/{prefix}/{table}.jsonl" if prefix else f"gs://{bucket}/{table}.jsonl"
+        spec = {
+            "jobReference": {"projectId": self.project, "location": location},
+            "configuration": {"load": {
+                "sourceUris": [src],
+                "destinationTable": {"projectId": self.project, "datasetId": dataset, "tableId": table},
+                "sourceFormat": "NEWLINE_DELIMITED_JSON", "autodetect": True, "writeDisposition": "WRITE_TRUNCATE",
+            }},
+        }
+        job = self.call("POST", jobs, json.dumps(spec).encode("utf-8")) or {}
+        job_id = job["jobReference"]["jobId"]
+        for _ in range(90):
+            st = self.call("GET", f"{jobs}/{q(job_id, safe='')}?location={q(location, safe='')}") or {}
+            status = st.get("status", {})
+            if status.get("state") == "DONE":
+                if status.get("errorResult"):
+                    raise RuntimeError(f"BigQuery load {table} failed: {status['errorResult']}")
+                return
+            time.sleep(2)
+        raise RuntimeError(f"BigQuery load {table} timed out")
+
+    def count_rows(self, dataset: str, table: str, location: str) -> int:
+        q = urllib.parse.quote
+        url = f"https://bigquery.googleapis.com/bigquery/v2/projects/{q(self.project, safe='')}/queries"
+        sql = f"SELECT COUNT(*) AS n FROM `{self.project}.{dataset}.{table}`"
+        res = self.call("POST", url, json.dumps({"query": sql, "useLegacySql": False, "location": location}).encode("utf-8")) or {}
+        return int(res["rows"][0]["f"][0]["v"])
+
+
+def cmd_sync(args: argparse.Namespace) -> None:
+    t0 = time.perf_counter()
+    db_path = Path(args.db).resolve()
+    if not db_path.exists():
+        print(f"[SYNC_ERROR] Vault database not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
+    project = (args.project or os.environ.get("GOOGLE_CLOUD_PROJECT", "")).strip()
+    if not project:
+        print("[SYNC_ERROR] Target GCP project missing. Pass --project or set GOOGLE_CLOUD_PROJECT.", file=sys.stderr)
+        sys.exit(1)
+
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        slice_table = "slices_fts" if "slices_fts" in tables else ("slices_fallback" if "slices_fallback" in tables else "")
+
+        hard_patterns = [p for p in SECRET_PATTERNS if p[0] != "ENV_SECRET"]
+        raw_secret_hits = 0
+        slice_records: list[dict] = []
+        if slice_table:
+            for row in conn.execute(f"SELECT path, folder_root, chunk_index, line_range, ast_summary, content FROM {slice_table}"):
+                content_str = str(row[5] or "")
+                for _label, pat in hard_patterns:
+                    for m in pat.finditer(content_str):
+                        matched = m.group(0)
+                        if "Dummy" in matched or "EXAMPLE" in matched or "REDACTED" in matched:
+                            continue
+                        raw_secret_hits += 1
+                slice_records.append({
+                    "path": _normalize_export_path(row[0]), "folder_root": str(row[1] or ""),
+                    "chunk_index": int(row[2]) if str(row[2]).isdigit() else 0,
+                    "line_range": str(row[3] or ""), "ast_summary": str(row[4] or ""), "content": content_str,
+                })
+        if raw_secret_hits > 0:
+            print(f"[SYNC_ABORTED_SECURITY] {raw_secret_hits} unredacted secret pattern(s) in vault slices; refusing cloud export.", file=sys.stderr)
+            sys.exit(2)
+
+        def _rows(sql: str, present: str) -> list:
+            return list(conn.execute(sql)) if present in tables else []
+
+        file_records = [{"sha256": str(r[0]), "path": _normalize_export_path(r[1]), "folder_root": str(r[2]), "ext": str(r[3]),
+                         "size_bytes": int(r[4] or 0), "ast_summary": str(r[5] or ""), "is_duplicate": bool(r[6])}
+                        for r in _rows("SELECT sha256, path, folder_root, ext, size_bytes, ast_summary, is_duplicate FROM files", "files")]
+        link_records = [{"source_path": _normalize_export_path(r[0]), "url": str(r[1]), "category": str(r[2]), "context": str(r[3] or "")}
+                        for r in _rows("SELECT source_path, url, category, context FROM links", "links")]
+        vhdx_records = [{"vhdx_path": _normalize_export_path(r[0]), "entry_path": str(r[1]), "entry_size": int(r[2] or 0), "mode_note": str(r[3] or "")}
+                        for r in _rows("SELECT vhdx_path, entry_path, entry_size, mode_note FROM vhdx_manifest", "vhdx_manifest")]
+        zip_records = [{"zip_path": _normalize_export_path(r[0]), "folder_root": str(r[1]), "entry_path": str(r[2]),
+                        "entry_size": int(r[3] or 0), "compressed_size": int(r[4] or 0)}
+                       for r in _rows("SELECT zip_path, folder_root, entry_path, entry_size, compressed_size FROM zip_manifest", "zip_manifest")]
+        audit_records = [{"source_path": _normalize_export_path(r[0]), "secret_type": str(r[1]), "line_number": int(r[2] or 0)}
+                         for r in _rows("SELECT source_path, secret_type, line_number FROM secret_audit", "secret_audit")]
+    finally:
+        conn.close()
+
+    parity = hashlib.sha256(f"{len(file_records)}:{len(slice_records)}:{len(link_records)}:{len(audit_records)}".encode("utf-8")).hexdigest()[:16]
+    payloads = {"files": file_records, "slices_redacted": slice_records, "links": link_records,
+                "vhdx_manifest": vhdx_records, "zip_manifest": zip_records, "secret_audit": audit_records}
+    prefix = args.prefix.strip("/")
+    gcs_uri = f"gs://{args.bucket}/{prefix}" if prefix else f"gs://{args.bucket}"
+
+    with tempfile.TemporaryDirectory(prefix="vault_gcp_sync_") as tmp:
+        stage = Path(tmp)
+        table_meta: dict[str, dict] = {}
+        total_bytes = 0
+        for tname, recs in payloads.items():
+            out = stage / f"{tname}.jsonl"
+            with out.open("w", encoding="utf-8", newline="\n") as fh:
+                for rec in recs:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            size = out.stat().st_size
+            table_meta[tname] = {"rows": len(recs), "bytes": size, "sha256": hashlib.sha256(out.read_bytes()).hexdigest()[:16]}
+            total_bytes += size
+        manifest = {"schema": "alpha_mcp.stage0_gcp_sync.v1", "vault_name": db_path.name, "parity_sha256": parity,
+                    "project": project, "location": args.location, "gcs_uri": gcs_uri,
+                    "bigquery_dataset": f"{project}.{args.dataset}", "unredacted_secret_hits": 0,
+                    "auth_transport": "rest_bearer_token", "tables": table_meta}
+        (stage / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        if not args.apply:
+            print(f"[SYNC_DRY_RUN] parity={parity} bytes={total_bytes} elapsed={time.perf_counter() - t0:.2f}s")
+            print(f"[DESTINATIONS] gcs={gcs_uri} bq={project}.{args.dataset} location={args.location}")
+            print("[TABLES] " + " ".join(f"{k}={v['rows']}" for k, v in table_meta.items()))
+            print("[GUARDRAILS] unredacted_secrets=0 binaries_excluded=True status=DRY_RUN_VERIFIED")
+            return
+
+        token, source = mint_gcp_bearer_token(args.impersonate_sa)
+        gcp = GcpRest(token, project)
+        gcp.ensure_bucket(args.bucket, args.location)
+        for tname in payloads:
+            gcp.upload_object(args.bucket, f"{prefix}/{tname}.jsonl" if prefix else f"{tname}.jsonl", (stage / f"{tname}.jsonl").read_bytes())
+        gcp.upload_object(args.bucket, f"{prefix}/manifest.json" if prefix else "manifest.json", (stage / "manifest.json").read_bytes())
+
+        verified: list[str] = []
+        if not args.skip_bq:
+            gcp.ensure_dataset(args.dataset, args.location)
+            for tname, meta in table_meta.items():
+                if meta["rows"] == 0:
+                    continue
+                gcp.load_table(args.bucket, prefix, args.dataset, tname, args.location)
+                n = gcp.count_rows(args.dataset, tname, args.location)
+                if n != meta["rows"]:
+                    raise RuntimeError(f"Row-count mismatch on {tname}: local={meta['rows']} bigquery={n}")
+                verified.append(f"{tname}:{n}")
+        print(f"[SYNC_APPLIED] parity={parity} bytes={total_bytes} auth={source} elapsed={time.perf_counter() - t0:.2f}s")
+        print(f"[DESTINATIONS] gcs={gcs_uri}/ bq={project}.{args.dataset} verified=[{', '.join(verified)}]")
+        print("[GUARDRAILS] unredacted_secrets=0 binaries_excluded=True status=SYNC_COMMITTED")
+
+
 def build_cli() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Stage 0 Argon-Carbon MCP Research Vault CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -754,6 +978,19 @@ def build_cli() -> argparse.ArgumentParser:
     p_aud = sub.add_parser("audit", help="View redacted secret locations, harvested URLs, and archive manifests")
     p_aud.add_argument("--db", default="./mcp_alpha_vault.sqlite3")
     p_aud.set_defaults(func=cmd_audit)
+
+    p_sync = sub.add_parser("sync", help="Export redacted vault JSONL + parity manifest to Cloud Storage & BigQuery over REST (default: dry-run)")
+    p_sync.add_argument("--target", choices=["gcp"], default="gcp", help="Cloud sync target (default: gcp)")
+    p_sync.add_argument("--db", default="./mcp_alpha_vault.sqlite3", help="Source SQLite WAL vault path")
+    p_sync.add_argument("--project", default="", help="Target GCP project ID (defaults to GOOGLE_CLOUD_PROJECT)")
+    p_sync.add_argument("--impersonate-sa", default="", help="Service account email to impersonate keylessly (defaults to GOOGLE_IMPERSONATE_SERVICE_ACCOUNT)")
+    p_sync.add_argument("--bucket", required=True, help="Target GCS bucket name (created if absent with --apply)")
+    p_sync.add_argument("--dataset", default="alpha_mcp_vault", help="Target BigQuery dataset (default: alpha_mcp_vault)")
+    p_sync.add_argument("--prefix", default="stage0/latest", help="GCS object prefix (default: stage0/latest)")
+    p_sync.add_argument("--location", default="us-east1", help="GCP region for GCS & BigQuery (default: us-east1)")
+    p_sync.add_argument("--skip-bq", action="store_true", help="Upload to GCS only, skip BigQuery load")
+    p_sync.add_argument("--apply", action="store_true", help="Execute cloud upload & BigQuery load (omit for dry-run)")
+    p_sync.set_defaults(func=cmd_sync)
 
     return parser
 
