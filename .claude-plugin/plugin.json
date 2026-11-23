@@ -1,0 +1,13 @@
+{
+  "name": "alpha-mcp",
+  "version": "1.0.0",
+  "description": "Stage 0 zero-dependency local research vault, SHA-256 deduplicated SQLite WAL + BM25 FTS5 indexer, credential redaction sieve, safe VHDX/ZIP inspector, and interactive walk-along guide for MCP workflows.",
+  "author": {
+    "name": "Eloquent",
+    "url": "https://github.com/mjeanhudson-dev"
+  },
+  "homepage": "https://github.com/mjeanhudson-dev/alpha-mcp",
+  "repository": "https://github.com/mjeanhudson-dev/alpha-mcp",
+  "license": "MIT",
+  "skills": "./skills/"
+}

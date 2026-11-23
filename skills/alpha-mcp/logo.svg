@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Alpha MCP Carbon Vault Spark">
+  <title>Alpha MCP</title>
+  <defs>
+    <linearGradient id="am-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#272A32"/>
+      <stop offset="100%" stop-color="#111216"/>
+    </linearGradient>
+    <linearGradient id="am-gem-top" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7DD3FC"/>
+      <stop offset="55%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+    <linearGradient id="am-gem-bot" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0EA5E9"/>
+      <stop offset="100%" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <linearGradient id="am-bolt" x1="15%" y1="0%" x2="85%" y2="100%">
+      <stop offset="0%" stop-color="#FFF066"/>
+      <stop offset="45%" stop-color="#FF9500"/>
+      <stop offset="100%" stop-color="#FF3B1F"/>
+    </linearGradient>
+    <linearGradient id="am-rim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6B3D"/>
+      <stop offset="50%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#FF4A1F"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded obsidian badge with dual-theme high-contrast rim (10% outer safe margin) -->
+  <rect x="44" y="44" width="424" height="424" rx="108" fill="url(#am-bg)" stroke="url(#am-rim)" stroke-width="18"/>
+  <!-- Faceted Argon-Carbon Gem (left/center anchor) -->
+  <polygon points="154,132 326,132 378,208 240,392 102,208" fill="url(#am-gem-bot)" stroke="#E0F2FE" stroke-width="10" stroke-linejoin="round"/>
+  <polygon points="154,132 326,132 378,208 102,208" fill="url(#am-gem-top)"/>
+  <polygon points="196,132 284,132 308,208 172,208" fill="#E0F2FE" opacity="0.48"/>
+  <polygon points="172,208 308,208 240,392" fill="#38BDF8" opacity="0.55"/>
+  <!-- Molten Safety-Orange Lightning Bolt cutting dynamically over the vault gem -->
+  <path d="M318 82 L198 258 L272 258 L224 428 L398 222 L316 222 Z" fill="url(#am-bolt)" stroke="#111216" stroke-width="14" stroke-linejoin="round"/>
+  <!-- Specular spark dot -->
+  <circle cx="136" cy="128" r="14" fill="#FFF7D6"/>
+</svg>

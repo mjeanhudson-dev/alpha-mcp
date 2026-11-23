@@ -1,6 +1,10 @@
+<p align="left">
+  <img src="./assets/logo.svg" width="56" height="56" alt="Alpha MCP" />
+</p>
+
 # Alpha MCP — Stage 0 Carbon Local Research Vault & Inference Layer
 
-**Author:** `Eloquent` (`@mjeanhudson-dev`) · **Runtime:** Python `3.10+` stdlib only (`0` pip dependencies) · **Storage:** SQLite WAL + BM25 FTS5
+**Author:** `Eloquent` (`@mjeanhudson-dev`) · **Runtime:** Python `3.10+` stdlib only (`0` pip dependencies) · **Storage:** SQLite WAL + BM25 FTS5 · **Plugin:** Native `/alpha-mcp` skill (`plugin.json` + `.claude-plugin/plugin.json`)
 
 **Alpha MCP** is a zero-dependency, local-first Stage 0 indexing CLI and unified inference architecture for developers and AI engineering teams. It turns sprawling folders of source code, Markdown specs, Jupyter notebooks, Chrome `.url` bookmarks, `.zip` archives, and `.vhdx` virtual disks into a sub-5ms, secret-scrubbed **SQLite WAL + BM25 FTS5** vault ready to wire into any Model Context Protocol (MCP) server without inflating context windows or leaking credentials.
 
