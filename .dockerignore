@@ -1,0 +1,28 @@
+# Version control & local databases
+.git
+.gitignore
+*.sqlite3*
+*.db
+*.db-*
+
+# Quarantined binary artifacts & local audit outputs
+*.vhdx
+*.vhd
+*.zip
+*.pdf
+*.pkl
+ingest_report.json
+vhdx_selective_stage/
+
+# Static web walk-along, tests, local deploy scripts & caches
+walk-along
+walk-along/
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+.pytest_cache
+deploy/*.ps1
+.taste-skill/
