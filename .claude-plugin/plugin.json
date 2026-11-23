@@ -9,5 +9,11 @@
   "homepage": "https://github.com/mjeanhudson-dev/alpha-mcp",
   "repository": "https://github.com/mjeanhudson-dev/alpha-mcp",
   "license": "MIT",
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "mcpServers": {
+    "alpha-mcp": {
+      "command": "python",
+      "args": ["alpha_mcp_server.py", "--transport", "stdio"]
+    }
+  }
 }

@@ -10,6 +10,12 @@
   "homepage": "https://github.com/mjeanhudson-dev/alpha-mcp",
   "repository": "https://github.com/mjeanhudson-dev/alpha-mcp",
   "logo": "assets/logo.svg",
+  "mcpServers": {
+    "alpha-mcp": {
+      "command": "python",
+      "args": ["alpha_mcp_server.py", "--transport", "stdio"]
+    }
+  },
   "suggestedPrompts": [
     "Run Alpha MCP Stage 0 ingestion and secret redaction audit over my local research folders",
     "Search my Alpha MCP SQLite FTS5 vault for MCP server patterns and return 160-line slices",

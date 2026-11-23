@@ -115,3 +115,14 @@ python mcp_carbon_ingest.py sync ... --apply                                    
 ```
 
 The worker needs `storage.admin`, `bigquery.dataEditor`, `bigquery.jobUser` and `serviceusage.serviceUsageConsumer` on the project; your user needs `iam.serviceAccountTokenCreator` on the worker. A token can also be supplied via `GOOGLE_OAUTH_ACCESS_TOKEN`. The sync aborts if any unredacted secret is found, and verifies BigQuery row counts after loading.
+
+## MCP server (stdio)
+
+`alpha_mcp_server.py` exposes the vault to any MCP client (stdlib only, read-only tools):
+
+```json
+{ "mcpServers": { "alpha-mcp": { "command": "python", "args": ["alpha_mcp_server.py", "--transport", "stdio"],
+  "env": { "ALPHA_MCP_VAULT_DB": "./mcp_alpha_vault.sqlite3" } } } }
+```
+
+Tools: `stage0_vault_fts_query`, `stage0_vault_manifest_lookup`, `stage0_ast_slice_and_parity` (blocks `.env`, keys, OAuth JSON), `precompensate_stdout_delta`, `tandem_edge_route`, and optional `vertex_keyless_query`. Every result passes a 13-pattern credential sieve. Self-check: `python alpha_mcp_server.py --selftest`.
