@@ -1,0 +1,181 @@
+{
+  "meta": {
+    "schema_version": "1.0",
+    "author": "Eloquent (@mjeanhudson-dev)",
+    "generator": "mcp_carbon_ingest.py",
+    "sample_root": "examples/sample_workspace",
+    "vhdx_mode": "inspect",
+    "public_hygiene": "Universal relative paths; zero personal identifiers; metadata-only secret audit."
+  },
+  "receipt": {
+    "parity_hash": "5ee0d39b62b63f02",
+    "elapsed_seconds": 0.31,
+    "files_indexed": 6,
+    "dedup_shunted": 1,
+    "unique_files_indexed": 5,
+    "slices_160L": 4,
+    "links": 9,
+    "unique_links": 9,
+    "vhdx_entries": 0,
+    "zip_entries": 0,
+    "secrets_redacted": 2,
+    "fts5_active": true,
+    "status": "SCRUBBED_SAFE_INDEX"
+  },
+  "indexed_files": [
+    {
+      "path": "examples/sample_workspace/architecture_notes.md",
+      "ext": ".md",
+      "size_bytes": 1336,
+      "sha256_prefix": "cab19ddfee6d7e05",
+      "is_duplicate": false
+    },
+    {
+      "path": "examples/sample_workspace/config_redaction_demo.txt",
+      "ext": ".txt",
+      "size_bytes": 330,
+      "sha256_prefix": "a70b9a4370e9f4bd",
+      "is_duplicate": false
+    },
+    {
+      "path": "examples/sample_workspace/demo_mcp_server.py",
+      "ext": ".py",
+      "size_bytes": 3980,
+      "sha256_prefix": "c3f45e8ef47cb9a9",
+      "is_duplicate": false
+    },
+    {
+      "path": "examples/sample_workspace/links.url",
+      "ext": ".url",
+      "size_bytes": 82,
+      "sha256_prefix": "4fafb36bc431ff4d",
+      "is_duplicate": false
+    },
+    {
+      "path": "examples/sample_workspace/notebook_sample.ipynb",
+      "ext": ".ipynb",
+      "size_bytes": 1649,
+      "sha256_prefix": "41a68e6b2d9299d7",
+      "is_duplicate": false
+    },
+    {
+      "path": "examples/sample_workspace/backup/demo_mcp_server_copy.py",
+      "ext": ".py",
+      "size_bytes": 3980,
+      "sha256_prefix": "c3f45e8ef47cb9a9",
+      "is_duplicate": true
+    }
+  ],
+  "secret_audit_summary": {
+    "policy": "METADATA_ONLY \u2014 relative path, secret_type, and count ONLY; raw values are scrubbed before indexing.",
+    "total_redacted_hits": 2,
+    "unredacted_in_slices_fts": 0,
+    "findings": [
+      {
+        "source_path": "examples/sample_workspace/config_redaction_demo.txt",
+        "secret_type": "ENV_SECRET",
+        "count": 2
+      }
+    ]
+  },
+  "harvested_urls_by_category": {
+    "notebook_or_mcp_hub": {
+      "records": 6,
+      "unique_urls": 6,
+      "urls": [
+        {
+          "url": "https://colab.research.google.com/",
+          "occurrences": 1
+        },
+        {
+          "url": "https://github.com/modelcontextprotocol/specification",
+          "occurrences": 1
+        },
+        {
+          "url": "https://huggingface.co/docs",
+          "occurrences": 1
+        },
+        {
+          "url": "https://modelcontextprotocol.io/docs/concepts/architecture",
+          "occurrences": 1
+        },
+        {
+          "url": "https://modelcontextprotocol.io/docs/getting-started/intro",
+          "occurrences": 1
+        },
+        {
+          "url": "https://modelcontextprotocol.io/specification/2025-03-26",
+          "occurrences": 1
+        }
+      ]
+    },
+    "web_reference": {
+      "records": 3,
+      "unique_urls": 3,
+      "urls": [
+        {
+          "url": "https://api.example.com/v1/mcp",
+          "occurrences": 1
+        },
+        {
+          "url": "https://docs.python.org/3/library/sqlite3.html",
+          "occurrences": 1
+        },
+        {
+          "url": "https://www.sqlite.org/fts5.html",
+          "occurrences": 1
+        }
+      ]
+    }
+  },
+  "python_ast_summaries": [
+    {
+      "path": "examples/sample_workspace/demo_mcp_server.py",
+      "is_duplicate": false,
+      "ast_lines": [
+        "\"\"\"Minimal stdlib-only MCP research server fixture for Stage 0 AST & FTS5 indexing demos.\"\"\"",
+        "class VaultConfig [resolved_db] (L14)",
+        "class LocalResearchMCPServer [__init__, list_tools, query_slices, handle_request] (L25)",
+        "def format_receipt(files, slices, links, secrets) (L92)",
+        "def main() (L105)"
+      ]
+    },
+    {
+      "path": "examples/sample_workspace/backup/demo_mcp_server_copy.py",
+      "is_duplicate": true,
+      "ast_lines": [
+        "\"\"\"Minimal stdlib-only MCP research server fixture for Stage 0 AST & FTS5 indexing demos.\"\"\"",
+        "class VaultConfig [resolved_db] (L14)",
+        "class LocalResearchMCPServer [__init__, list_tools, query_slices, handle_request] (L25)",
+        "def format_receipt(files, slices, links, secrets) (L92)",
+        "def main() (L105)"
+      ]
+    }
+  ],
+  "smoke_test_query": {
+    "query": "mcp",
+    "top_k": 5,
+    "hits": [
+      {
+        "rank": 1,
+        "path": "examples/sample_workspace/notebook_sample.ipynb",
+        "line_range": "L1-L19"
+      },
+      {
+        "rank": 2,
+        "path": "examples/sample_workspace/config_redaction_demo.txt",
+        "line_range": "L1-L5"
+      },
+      {
+        "rank": 3,
+        "path": "examples/sample_workspace/demo_mcp_server.py",
+        "line_range": "L1-L111"
+      },
+      {
+        "rank": 4,
+        "path": "examples/sample_workspace/architecture_notes.md",
+        "line_range": "L1-L18"
+      }
+    ]
+  }
+}

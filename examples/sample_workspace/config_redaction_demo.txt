@@ -1,0 +1,5 @@
+# Safe synthetic fixture demonstrating Stage 0 pre-index credential redaction.
+# All values below are non-functional placeholders on example domains (never real secrets).
+DEMO_MCP_ENDPOINT=https://api.example.com/v1/mcp
+DEMO_API_KEY=example_placeholder_key_not_real_001
+DEMO_WEBHOOK_SECRET=example_webhook_signing_placeholder_002

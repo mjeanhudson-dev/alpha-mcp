@@ -1,0 +1,1444 @@
+<!doctype html>
+<html lang="en" data-type="software" data-radius="sharp" data-ground="sage" data-buttons="arrow" data-motion>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Alpha MCP: local research vault for engineering teams</title>
+<meta name="description" content="Index local codebases, Jupyter notebooks, .zip archives and .vhdx images into SQLite WAL with FTS5 BM25 search and nine pre-index secret redaction rules.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Alpha MCP: local research vault for engineering teams">
+<meta property="og:description" content="Interactive four-step walk-along for indexing folders, scrubbing secrets and running BM25 FTS5 queries locally in Python stdlib.">
+<meta property="og:image" content="share.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#18191b">
+<!-- <link rel="canonical" href="https://alpha-mcp.example/walk-along/"> -->
+<meta name="site-kind" content="software">
+<meta name="page-type" content="software">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400..700&family=JetBrains+Mono:wght@400..500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/system.css">
+<link rel="stylesheet" href="assets/ui/cards.css">
+<link rel="stylesheet" href="assets/motion/motion.css">
+<link rel="stylesheet" href="assets/layout/layout.css">
+<link rel="stylesheet" href="assets/icons/icon.css">
+<style>
+:root {
+  --p-bg: #18191b; --p-surface: #222427; --p-ink: #eff0f1; --p-muted: #9c9ea3;
+  --p-accent: #ff4a1f; --p-accent-ink: #18191b; --p-action: #ff4a1f; --p-action-ink: #18191b;
+  --p-inv-bg: #eff0f1; --p-inv-surface: #dedfe0; --p-inv-ink: #18191b; --p-inv-muted: #5b5c5e;
+  --p-inv-accent: #18191b; --p-inv-accent-ink: #eff0f1; --p-inv-action: #18191b; --p-inv-action-ink: #eff0f1;
+  --font-display: "Manrope", system-ui, sans-serif;
+  --font-text: "Manrope", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --display-weight: 500;
+  --display-tracking: -0.035em;
+  --display-tracking-xl: -0.045em;
+  --ly-scale: 0.97;
+}
+</style>
+<link rel="stylesheet" href="assets/ui/base.css">
+<link rel="stylesheet" href="assets/ui/window/fragment.css">
+<link rel="stylesheet" href="assets/ui/diff-review/fragment.css">
+<link rel="stylesheet" href="assets/ui/terminal-run/fragment.css">
+<link rel="stylesheet" href="assets/ui/files/fragment.css">
+<link rel="stylesheet" href="assets/ui/search/fragment.css">
+<link rel="stylesheet" href="assets/diagrams/diagram.css">
+<script>document.documentElement.classList.add('m-enter');setTimeout(()=>document.documentElement.classList.add('m-enter-done'),700)</script>
+<script>document.documentElement.classList.add('mo-js');setTimeout(()=>document.documentElement.classList.add('mo-safe'),2500)</script>
+<link rel="modulepreload" href="assets/moments/moments.js">
+<link rel="modulepreload" href="assets/moments/lib.js">
+<link rel="modulepreload" href="assets/moments/word-highlight/moment.js">
+<style>
+  /* nav-cards dropdown panels & clean mobile bar */
+  .menu-card .panel {
+    --p-h: 120px; display: flex; align-items: center; justify-content: center; gap: var(--s-4);
+    background: var(--surface); border: 1px solid var(--line);
+  }
+  .menu-card .ic-tile { width: 44px; height: 44px; background: var(--bg); border-color: var(--line-strong); }
+  @media (max-width: 639px) {
+    .nav__bar { gap: 6px; }
+    .nav__logo { font-size: 15.5px; gap: 5px; }
+    .nav__logo .mark:not(.mark--initial) { width: 16px; height: 16px; }
+    .nav:not(.is-open) .nav__actions .btn { padding-inline: 10px; font-size: 13px; gap: 5px; }
+  }
+  @media (max-width: 359px) {
+    .nav:not(.is-open) .nav__actions { display: none; }
+    .nav:not(.is-open) .nav__toggle { margin-left: auto; }
+  }
+
+  /* hold still diagrams strictly static until hovered/focused */
+  .dg.is-still .dg-node,
+  .dg.is-still .dg-node *,
+  .dg.is-still .dg-row,
+  .dg.is-still .dg-meta { transition-duration: 0ms !important; }
+
+  /* hero readability & focus ring on lit sage window */
+  .hero--centred .hero__lead { color: var(--ink); }
+  .hero__window .loop-pause:focus-visible {
+    outline: 2px solid #18191b;
+    outline-offset: 2px;
+    box-shadow: 0 0 0 4px #eff0f1;
+  }
+
+  /* hero window: dark CLI + BM25 query preview rising out of the lit sage silk-folds frame */
+  .hero__window {
+    background:
+      radial-gradient(80% 90% at 15% 0%, #e4eadf, transparent 68%),
+      radial-gradient(65% 80% at 95% 100%, #98b190, transparent 70%),
+      #cdd6c6;
+  }
+  .hw-win {
+    background: #17191c; color: #eff0f1; border-radius: var(--r-md);
+    border: 1px solid rgb(255 255 255 / .12);
+    box-shadow: 0 24px 56px -22px rgb(0 0 0 / .62);
+    overflow: hidden; text-align: left; max-width: 100%;
+  }
+  .hw-bar {
+    display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 14px;
+    border-bottom: 1px solid rgb(255 255 255 / .08); background: #1e2024;
+    font: 500 12.5px/1 var(--font-text); color: #b5b9bf;
+  }
+  .hw-bar b { color: #eff0f1; font-weight: 500; }
+  .hw-bar .sp { flex: 1; }
+  .hw-bar__tag { font: 500 11.5px/1 var(--font-mono); color: #cdd6c6; }
+  .hw-body { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: 220px; }
+  .hw-tree {
+    border-right: 1px solid rgb(255 255 255 / .08); padding: 10px 12px;
+    display: grid; align-content: start; gap: 3px; background: #141619;
+  }
+  .hw-tree__lbl { font: 500 11.5px/1.3 var(--font-text); color: #9c9ea3; padding: 2px 8px 4px; }
+  .hw-file {
+    display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 4px;
+    font: 400 12px/1.25 var(--font-mono); color: #d5d8dc; min-width: 0;
+  }
+  .hw-file.is-on { background: rgb(255 255 255 / .07); color: #eff0f1; }
+  .hw-file img { width: 14px; height: 14px; flex: none; }
+  .hw-file em { margin-left: auto; font-style: normal; font-size: 11px; color: #a7abb1; flex: none; }
+  .hw-file em.is-hit { color: #ff7a58; }
+  .hw-main { padding: 10px 14px; display: grid; align-content: start; gap: 8px; font-family: var(--font-mono); min-width: 0; }
+  .hw-cmd {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 4px;
+    background: #101214; border: 1px solid rgb(255 255 255 / .08);
+    font-size: 12px; line-height: 1.35; color: #eff0f1; min-width: 0;
+  }
+  .hw-cmd b { color: #ff4a1f; font-weight: 500; flex: none; }
+  .hw-cmd span { min-width: 0; overflow-wrap: anywhere; }
+  .hw-receipt {
+    display: grid; gap: 3px; padding: 8px 10px; border-radius: 4px;
+    background: rgb(255 255 255 / .03); border-left: 2px solid #ff4a1f;
+    font-size: 11.5px; line-height: 1.4; color: #d2d6dc;
+  }
+  .hw-receipt strong { color: #eff0f1; font-weight: 500; }
+  .hw-hit {
+    display: grid; gap: 3px; padding: 8px 10px; border-radius: 4px;
+    background: #1e2126; border: 1px solid rgb(255 255 255 / .08);
+    font-size: 11.5px; line-height: 1.38; color: #c7cbd1;
+  }
+  .hw-hit__head { display: flex; justify-content: space-between; gap: 8px; color: #eff0f1; font-weight: 500; }
+  .hw-hit mark { background: rgb(255 74 31 / .22); color: #ff9c82; padding: 0 3px; border-radius: 2px; }
+  @media (max-width: 899px) {
+    .hw-body { grid-template-columns: 196px minmax(0, 1fr); }
+    .hw-main { padding: 10px 12px; }
+  }
+  @media (max-width: 639px) {
+    .hw-body { grid-template-columns: minmax(0, 1fr); min-height: 190px; }
+    .hw-tree, .hw-bar__tag { display: none; }
+    .hw-main { padding: 10px 12px; gap: 6px; }
+    .hw-hit { display: none; }
+  }
+
+  /* app-frame interactive 4-step walk-along (#walkthrough) */
+  #walkthrough > .wrap { gap: var(--s-5); }
+  .app.ui {
+    display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    min-height: 500px; background: #17191c; color: #eff0f1;
+    border: 1px solid color-mix(in oklab, var(--ink) 16%, transparent);
+    border-radius: var(--r-md); box-shadow: 0 24px 56px -28px rgb(0 0 0 / .6);
+    --u-bg: #17191c; --u-fill: #1f2226; --u-fill-2: #282b30; --u-ink: #eff0f1;
+    --u-muted: #b0b4ba; --u-soft: #969ba2; --u-line: rgb(255 255 255 / .09);
+    --u-line-2: rgb(255 255 255 / .24); --u-accent: #ff4a1f; --u-accent-text: #ff8a6b;
+    --u-tint: rgb(255 74 31 / .16);
+  }
+  .app > .app__pane { position: relative; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .app > .app__pane + .app__pane { border-left: 1px solid var(--u-line); }
+  .wa-bar {
+    display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 14px; flex: none;
+    border-bottom: 1px solid var(--u-line); background: var(--u-fill);
+    font: 500 13px/1 var(--font-text); color: var(--u-muted);
+  }
+  .wa-bar b { color: var(--u-ink); font-weight: 500; }
+  .wa-bar .sp { flex: 1; }
+  .wa-badge {
+    display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 4px;
+    font: 500 12px/1 var(--font-mono); color: var(--u-ink);
+    background: var(--u-fill-2); border: 1px solid var(--u-line-2); font-variant-numeric: tabular-nums;
+  }
+  .wa-steps { display: grid; border-bottom: 1px solid var(--u-line); }
+  .wa-step {
+    position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center;
+    gap: 2px 10px; width: 100%; min-height: 52px; padding: 9px 14px; text-align: left;
+    border: 0; border-bottom: 1px solid var(--u-line); background: transparent; color: var(--u-ink); cursor: pointer;
+    transition: background-color var(--dur) var(--ease);
+  }
+  .wa-step:last-child { border-bottom: 0; }
+  .wa-step:hover { background: rgb(255 255 255 / .05); }
+  .wa-step[aria-pressed="true"] { background: rgb(255 255 255 / .07); }
+  .wa-step[aria-pressed="true"]::before {
+    content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--u-accent);
+  }
+  .wa-step__n {
+    grid-column: 1; grid-row: 1 / span 2; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 4px;
+    font: 500 12px/1 var(--font-mono); color: var(--u-muted); background: var(--u-fill-2);
+    border: 1px solid var(--u-line-2);
+  }
+  .wa-step[aria-pressed="true"] .wa-step__n { background: var(--u-accent); color: #18191b; border-color: var(--u-accent); }
+  .wa-step__t { grid-column: 2; grid-row: 1; font: 500 14px/1.3 var(--font-text); color: var(--u-ink); }
+  .wa-step__d { grid-column: 2; grid-row: 2; font: 400 12.5px/1.3 var(--font-text); color: var(--u-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wa-step__tag {
+    grid-column: 3; grid-row: 1 / span 2; font: 500 11.5px/1 var(--font-mono); color: var(--u-muted);
+    padding: 4px 7px; border-radius: 4px; border: 1px solid var(--u-line-2);
+  }
+  .wa-step[aria-pressed="true"] .wa-step__tag { color: var(--u-accent-text); border-color: rgb(255 74 31 / .48); background: var(--u-tint); }
+  .wa-ledger { padding: 10px 14px 14px; display: grid; gap: 5px; align-content: start; background: var(--u-bg); }
+  .wa-ledger__head { font: 500 12px/1.4 var(--font-text); color: var(--u-soft); display: flex; justify-content: space-between; }
+  .wa-file-row {
+    display: flex; align-items: center; gap: 8px; padding: 5px 0; border-top: 1px solid var(--u-line);
+    font: 400 12.5px/1.35 var(--font-mono); color: #dce0e5; min-width: 0;
+  }
+  .wa-file-row img { width: 15px; height: 15px; flex: none; }
+  .wa-file-row__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wa-file-row__st {
+    margin-left: auto; flex: none; font: 500 11.5px/1 var(--font-mono); color: var(--u-muted);
+    padding: 3px 6px; border-radius: 3px; background: var(--u-fill);
+  }
+  .wa-file-row__st.is-accent { color: #ff8f70; background: var(--u-tint); }
+  .wa-file-row__st.is-ok { color: #95e0af; background: rgb(46 160 67 / .18); }
+
+  /* right open pane */
+  .wa-head {
+    display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 16px; flex: none;
+    border-bottom: 1px solid var(--u-line); background: var(--u-fill);
+  }
+  .wa-dots { display: flex; gap: 4px; align-items: center; }
+  .wa-dots i { width: 18px; height: 3px; border-radius: 2px; background: rgb(255 255 255 / .18); transition: background-color var(--dur) var(--ease); }
+  .wa-dots i.is-on { background: var(--u-accent); }
+  .wa-head__label { font: 500 13px/1 var(--font-text); color: var(--u-ink); }
+  .wa-nav { margin-left: auto; display: flex; gap: 6px; }
+  .wa-mini-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    min-height: 30px; min-width: 30px; padding: 0 10px; border-radius: 4px;
+    border: 1px solid var(--u-line-2); background: transparent; color: var(--u-ink);
+    font: 500 12.5px/1 var(--font-text); cursor: pointer;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  }
+  .wa-mini-btn:hover { background: rgb(255 255 255 / .08); border-color: rgb(255 255 255 / .4); }
+  .wa-mini-btn:disabled { opacity: .45; cursor: not-allowed; }
+  .wa-body { flex: 1 1 auto; min-height: 0; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+  .wa-panel { display: flex; flex-direction: column; gap: 12px; min-height: 0; flex: 1 1 auto; }
+  .wa-panel[hidden] { display: none; }
+  .wa-note { font: 400 14.5px/1.5 var(--font-text); color: #e2e5ea; max-width: 60ch; }
+  .wa-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .wa-chip {
+    display: inline-flex; align-items: center; min-height: 30px; padding: 0 10px; border-radius: 4px;
+    border: 1px solid var(--u-line-2); background: transparent; color: var(--u-muted);
+    font: 500 12.5px/1 var(--font-mono); cursor: pointer;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+  }
+  .wa-chip:hover { background: rgb(255 255 255 / .08); border-color: rgb(255 255 255 / .36); color: var(--u-ink); }
+  .wa-chip[aria-pressed="true"] { color: var(--u-ink); border-color: var(--u-accent); background: var(--u-tint); }
+  .wa-cmd-box {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: 4px; background: #101214; border: 1px solid var(--u-line-2);
+    min-width: 0; max-width: 100%;
+  }
+  .wa-cmd-box code {
+    min-width: 0; font: 400 12.5px/1.45 var(--font-mono); color: #eff0f1;
+    white-space: normal; overflow-wrap: anywhere;
+  }
+  /* modern-web-guidance copy-button: outline style matches secondary button + outside live region */
+  .copy { position: relative; display: inline-flex; align-items: center; flex: none; }
+  .copy-button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    min-inline-size: 32px; min-block-size: 30px; padding: 0 10px; border-radius: var(--r-btn);
+    border: 1px solid rgb(255 255 255 / .28); background: transparent; color: #eff0f1;
+    font: 500 12.5px/1 var(--font-text); cursor: pointer;
+    transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  }
+  .copy-button:hover { background: rgb(255 255 255 / .08); border-color: rgb(255 255 255 / .46); }
+  .copy-button svg { width: 14px; height: 14px; flex: none; }
+  .copy-button .ic-ok { display: none; }
+  .copy-button[data-copied] .ic-copy { display: none; }
+  .copy-button[data-copied] .ic-ok { display: block; color: #95e0af; }
+  .copy-button[data-copied] { border-color: rgb(149 224 175 / .55); }
+  .copy-button[data-failed] { border-color: #ff4a1f; }
+  .copy .tip {
+    position: absolute; inset-block-end: calc(100% + 6px); inset-inline-end: 0;
+    padding: 4px 8px; border-radius: 4px; background: #eff0f1; color: #18191b;
+    font: 500 12px/1 var(--font-text); white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity 150ms ease;
+  }
+  .copy-button:is([data-copied], [data-failed]) + .tip { opacity: 1; }
+  .wa-out {
+    flex: 1 1 auto; min-height: 0; padding: 12px 14px; border-radius: 4px;
+    background: #121417; border: 1px solid var(--u-line);
+    font: 400 12.5px/1.55 var(--font-mono); color: #d5d9df; overflow: hidden;
+    display: grid; align-content: start; gap: 6px;
+  }
+  .wa-out__row { display: flex; justify-content: space-between; gap: 12px; padding-top: 6px; border-top: 1px solid rgb(255 255 255 / .06); }
+  .wa-out__row:first-child { padding-top: 0; border-top: 0; }
+  .wa-out__k { color: #eff0f1; font-weight: 500; }
+  .wa-out__v { color: #aeb3ba; text-align: right; white-space: nowrap; }
+  .wa-out__v.is-ok { color: #95e0af; }
+  .wa-out__v.is-warn { color: #ff8f70; }
+  .wa-diff-ln { display: grid; grid-template-columns: 26px 18px minmax(0, 1fr); gap: 6px; padding: 3px 6px; border-radius: 3px; font-size: 12px; }
+  .wa-diff-ln.is-del { background: rgb(248 81 73 / .14); color: #ffa198; }
+  .wa-diff-ln.is-add { background: rgb(46 160 67 / .16); color: #9be9a8; }
+  .wa-diff-ln.is-ctx { color: #aeb3ba; }
+  .wa-search-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .wa-search-row label { font: 500 13px/1 var(--font-text); color: var(--u-muted); flex: none; }
+  .wa-search-row input {
+    flex: 1 1 140px; min-width: 0; height: 34px; padding: 0 10px; border-radius: 4px;
+    border: 1px solid var(--u-line-2); background: #101214; color: #eff0f1;
+    font: 400 13px/1 var(--font-mono);
+  }
+  .wa-hit-card {
+    padding: 8px 10px; border-radius: 4px; background: #1b1e23; border: 1px solid var(--u-line);
+    display: grid; gap: 3px;
+  }
+  .wa-hit-card__top { display: flex; justify-content: space-between; gap: 8px; color: #eff0f1; font-weight: 500; font-size: 12.5px; }
+  .wa-hit-card__ast { color: #95e0af; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wa-hit-card__snip { color: #cfd3d9; font-size: 12px; }
+  .wa-hit-card mark { background: rgb(255 74 31 / .24); color: #ffa085; padding: 0 3px; border-radius: 2px; }
+  .wa-check-list { display: grid; gap: 6px; }
+  .wa-check-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 7px 10px; border-radius: 4px; background: #1b1e23; border: 1px solid var(--u-line);
+    font-size: 12.5px;
+  }
+  .wa-check-item b { color: #eff0f1; font-weight: 500; }
+  .wa-check-item span { color: #95e0af; font-size: 12px; }
+
+  @media (min-width: 1024px) and (max-width: 1279px) {
+    .app.ui { grid-template-columns: minmax(0, 4.5fr) minmax(0, 7.5fr); min-height: 440px; }
+    .wa-ledger { display: none; }
+  }
+  @media (max-width: 1023px) {
+    .app.ui { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); min-height: 540px; }
+    .app > .app__pane--list { max-height: 232px; }
+    .wa-ledger { display: none; }
+    .app > .app__pane + .app__pane { border-left: 0; border-top: 1px solid var(--u-line); }
+  }
+  @media (max-width: 639px) {
+    .app.ui { grid-template-rows: minmax(0, 1fr); min-height: 440px; }
+    .app > .app__pane--list { display: none; }
+    .app > .app__pane + .app__pane { border-top: 0; }
+    .wa-body { padding: 14px; }
+    .wa-mini-btn, .copy-button, .wa-chip { min-height: 44px; min-width: 44px; }
+    .wa-head { height: auto; padding: 8px 12px; flex-wrap: wrap; }
+    .wa-dots { display: none; }
+    .wa-out__row { flex-direction: column; gap: 2px; }
+    .wa-out__v { text-align: left; white-space: normal; }
+  }
+
+  /* pipeline 2x2 panel heights & dark diff contrast */
+  #pipeline .section-head > .link { justify-self: start; width: auto; max-width: 100%; }
+  #pipeline .dg .dg-node.dg-node--core-pill {
+    height: 32px !important; border-radius: var(--dg-r, 6px) !important;
+    background: var(--dg-node, #322f30) !important; color: #eff0f1 !important;
+    border: 1px solid var(--dg-border, rgb(255 255 255 / .12)) !important;
+    box-shadow: var(--dg-shadow, none) !important; font-size: 13px !important;
+  }
+  #pipeline .dg .dg-node.dg-node--core-pill .dg-label { color: #eff0f1 !important; }
+  #pipeline .dg .dg-node.dg-node--core-pill::before,
+  #pipeline .dg .dg-node.dg-node--core-pill::after { display: none !important; content: none !important; }
+  #pipeline .dg.is-still .dg-node.is-hit {
+    border-color: var(--dg-border, rgb(255 255 255 / .12)) !important;
+    box-shadow: var(--dg-shadow, none) !important;
+  }
+  #pipeline .panel { --p-h: 280px; }
+  #pipeline .panel--dg { display: flex; padding: 0; background: #1d2024; }
+  #pipeline .panel--dg::before { display: none; }
+  #pipeline .panel--dg .dg { width: 100%; height: 100%; min-height: var(--p-h); }
+  #pipeline .ui-files__status { background: transparent; border: 0; padding: 0; box-shadow: none; color: #18191b; font-weight: 500; }
+  #pipeline .ui-diff { --u-bg: #1b1d21; --u-fill: #23262c; --u-ink: #eff0f1; --u-muted: #b3b7be; }
+  #pipeline .ui-diff__by .ui-avatar { background: #eff0f1; color: #18191b; }
+  #pipeline .ui-diff__ln.is-add mark.ui-diff__w { color: #eff0f1; background: rgb(46 160 67 / .36); }
+  #pipeline .ui-diff__ln.is-del mark.ui-diff__w { color: #eff0f1; background: rgb(248 81 73 / .36); }
+  @media (min-width: 1024px) and (max-width: 1279px) {
+    #pipeline .panel { --p-h: 212px; }
+  }
+  @media (min-width: 640px) and (max-width: 1023px) {
+    #pipeline .panel { --p-h: 220px; }
+  }
+  @media (max-width: 639px) {
+    #pipeline > .wrap { gap: var(--s-3); }
+    #pipeline .group { gap: var(--s-3); }
+    #pipeline .section-head { margin-bottom: var(--s-2); gap: 6px; }
+    #pipeline .card--row { gap: 4px; }
+    #pipeline .panel { --p-h: 126px; }
+    #pipeline .stage { --fade-h: 28px; }
+    #pipeline .at-corner.wide { --ax: 14px; --ay: 14px; --w: 440px; }
+    #pipeline .ui-diff__lines > :nth-child(n+3) { display: none; }
+    #pipeline .ui-term__track > :nth-child(n+4) { display: none; }
+    .ui-term__ln { font-size: 11px; }
+    .ui-term__cwd { display: none; }
+  }
+
+  /* architecture split diagram frame */
+  #architecture .frame--dg { padding: 0; background: #1c1e22; border-color: var(--line); }
+  #architecture .frame--dg::before { display: none; }
+  #architecture .frame--dg .dg { width: 100%; height: 100%; min-height: 420px; }
+  @media (max-width: 639px) {
+    #architecture .frame--dg .dg { min-height: 340px; }
+  }
+
+  /* commands tabs-tour panel & sliding orange underline tab bar */
+  #commands .span-5 { min-width: 0; }
+  #commands .tabs {
+    display: flex; flex-wrap: nowrap; gap: var(--s-5);
+    border-bottom: 1px solid var(--line);
+  }
+  #commands .tab {
+    min-height: 44px; min-width: 44px; padding: 0 4px; border: 0; border-bottom: 2px solid transparent;
+    border-radius: 0; margin-bottom: -1px; background: transparent; color: var(--muted);
+    font-size: var(--t-small); font-weight: 500; white-space: nowrap;
+  }
+  #commands .tab:hover { color: var(--ink); border-bottom-color: var(--line-strong); }
+  #commands .tab[aria-selected="true"] {
+    background: transparent; color: var(--ink); border-color: transparent;
+    border-bottom-color: var(--action);
+  }
+  #commands .tabs.m-has-ind .tab[aria-selected="true"] { border-bottom-color: transparent; }
+  #commands .m-tab-ind {
+    top: auto; bottom: -1px; height: 2px; border-radius: 0;
+    background: var(--action);
+  }
+  .cmd-panel {
+    margin-top: var(--s-5); display: grid; grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-4); align-content: start; min-width: 0;
+  }
+  .cmd-panel p { color: var(--ink); max-width: 48ch; }
+  .cmd-snippet {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px;
+    padding: 10px 12px; border-radius: var(--r-sm); background: #121417;
+    border: 1px solid var(--line-strong); min-width: 0; max-width: 100%;
+  }
+  .cmd-snippet code {
+    min-width: 0; font: 400 13px/1.45 var(--font-mono); color: #eff0f1;
+    white-space: normal; overflow-wrap: anywhere;
+  }
+  #commands .frame--split { --ratio: 78%; background: var(--ground-bg); }
+  #commands .cmd-screen { position: absolute; inset: 0; }
+  #commands .cmd-screen[hidden] { display: none; }
+  @media (max-width: 639px) {
+    #commands .frame--split { --ratio: 96%; min-height: 320px; }
+  }
+
+  /* faq stack icons & compact pacing */
+  .faq-stack {
+    display: flex; flex-wrap: wrap; gap: var(--s-3); margin-top: var(--s-6);
+  }
+  .faq-stack .ic-tile {
+    width: 48px; height: 48px; background: #eff0f1; border-color: transparent;
+  }
+  .faq-stack .ic-tile--wide { width: 76px; padding-inline: 10px; }
+  .faq-stack .ic-tile--wide img { width: 56px; height: 26px; object-fit: contain; }
+  @media (min-width: 1280px) {
+    #faq .faq__item { padding-block: var(--s-5); }
+  }
+  @media (min-width: 1024px) and (max-width: 1279px) {
+    #faq .faq__item { padding-block: var(--s-3); }
+  }
+  @media (max-width: 639px) {
+    #faq .faq__item { padding-block: var(--s-3); }
+    .faq-stack { margin-top: var(--s-4); }
+  }
+
+  /* word-highlight statement spacing */
+  #local-first > .wrap { justify-content: flex-start; gap: var(--s-5); }
+  #local-first .t-label { color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) {
+    .copy .tip { transition: opacity 1ms; }
+  }
+</style>
+</head>
+<body>
+<!-- type: software
+     deal: hero centred, palette graphite-safety-orange (near-black ground with safety-orange accent suits a terminal-native developer CLI and credential redaction sieve), type manrope (Manrope + JetBrains Mono), radius sharp, nav nav-cards, footer footer-dark, close close-type, rhythm space, buttons arrow, mark dots, ground sage, hero effect silk-folds, card ground fluted-glass, grounds none
+     moments: word-highlight in #local-first -->
+
+<header class="nav">
+  <div class="wrap nav__bar">
+    <a class="skip-link" href="#top">Skip to content</a>
+    <a class="nav__logo" href="#top"><span class="mark" data-mark="dots" aria-hidden="true"></span>Alpha MCP</a>
+    <nav class="nav__links" aria-label="Main">
+      <div class="nav__item">
+        <a class="nav__link" href="#walkthrough">Stages <svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        <div class="nav__menu">
+          <div class="wrap grid">
+            <a class="menu-card span-4" href="#walkthrough">
+              <div class="panel" aria-hidden="true">
+                <span class="ic-tile"><img data-icon="python" src="assets/icons/python.svg" alt="" width="24" height="24" loading="lazy"></span>
+                <span class="ic-tile"><img data-icon="zip" src="assets/icons/zip.svg" alt="" width="24" height="24" loading="lazy"></span>
+              </div>
+              <span class="t-card">Walk through all four stages</span>
+              <span class="t-small muted">Inspect folders, scrub keys, query and wire</span>
+            </a>
+            <a class="menu-card span-4" href="#pipeline">
+              <div class="panel" aria-hidden="true">
+                <span class="ic-tile"><img data-icon="json" src="assets/icons/json.svg" alt="" width="24" height="24" loading="lazy"></span>
+                <span class="ic-tile"><img data-icon="py" src="assets/icons/py.svg" alt="" width="24" height="24" loading="lazy"></span>
+              </div>
+              <span class="t-card">Pipeline stages</span>
+              <span class="t-small muted">Archive manifests, redaction sieve and slices</span>
+            </a>
+            <a class="menu-card span-4" href="#commands">
+              <div class="panel" aria-hidden="true">
+                <span class="ic-tile"><img data-icon="sqlite" src="assets/icons/sqlite.svg" alt="" width="24" height="24" loading="lazy"></span>
+                <span class="ic-tile"><img data-icon="claude-code" src="assets/icons/claude-code.svg" alt="" width="24" height="24" loading="lazy"></span>
+              </div>
+              <span class="t-card">Alpha MCP CLI commands</span>
+              <span class="t-small muted">Index, query and audit from any terminal</span>
+            </a>
+          </div>
+        </div>
+      </div>
+      <div class="nav__item"><a class="nav__link" href="#pipeline">Pipeline</a></div>
+      <div class="nav__item"><a class="nav__link" href="#architecture">Vault</a></div>
+      <div class="nav__item"><a class="nav__link" href="#commands">Commands</a></div>
+      <div class="nav__item"><a class="nav__link" href="#faq">Questions</a></div>
+    </nav>
+    <div class="nav__actions">
+      <a class="btn btn--primary" href="#walkthrough">Start the walk-along<svg class="m-arrow" viewBox="0 0 12 12" aria-hidden="true"><path class="m-arrow__stem" d="M1 6h8"/><path class="m-arrow__head" d="M4.5 2.5 8 6l-3.5 3.5"/></svg></a>
+    </div>
+    <button class="nav__toggle" type="button" aria-expanded="false" aria-label="Menu">
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 5h14M2 13h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="top">
+  <!-- SCREEN 1: HERO (centred, dealt) -->
+  <section class="hero hero--centred" data-enter aria-labelledby="hero-h">
+    <div class="wrap"><div class="hero-text">
+      <div class="hero__c">
+        <a class="pill" href="#walkthrough"><span>Python 3.10+ stdlib</span><span class="muted">Zero pip packages</span></a>
+        <h1 id="hero-h">Local MCP vault for research teams</h1>
+        <p class="hero__lead">Index folders, Jupyter notebooks, .zip archives and .vhdx images into SQLite FTS5 in 160-line slices. Nine credential rules scrub lines before indexing.</p>
+        <div class="btn-row">
+          <a class="btn btn--primary" href="#walkthrough">Start the walk-along<svg class="m-arrow" viewBox="0 0 12 12" aria-hidden="true"><path class="m-arrow__stem" d="M1 6h8"/><path class="m-arrow__head" d="M4.5 2.5 8 6l-3.5 3.5"/></svg></a>
+          <a class="btn btn--secondary" href="#commands">See CLI commands</a>
+        </div>
+      </div>
+      <div class="hero__window" data-fx="silk-folds" data-fx-seed="17" data-fx-palette='{"bg":"#cdd6c6","surface":"#dce3d6","ink":"#262d24","accent":"#6c8e63"}' data-fx-params='{"tone":1}' role="img" aria-label="Alpha MCP terminal window showing Stage 0 ingest receipt and BM25 FTS5 query match for demo_mcp_server.py">
+        <div class="ui ui-hero-win ly-piece hw-win" aria-hidden="true">
+          <div class="hw-bar">
+            <span class="ui-dots"><i></i><i></i><i></i></span>
+            <span><b>Alpha MCP</b> &middot; mcp_alpha_vault.sqlite3</span>
+            <span class="sp"></span>
+            <span class="hw-bar__tag">WAL + FTS5 BM25</span>
+          </div>
+          <div class="hw-body">
+            <div class="hw-tree">
+              <span class="hw-tree__lbl">Indexed workspace</span>
+              <span class="hw-file is-on"><img data-icon="py" src="assets/icons/py.svg" alt="" width="14" height="14" loading="lazy">demo_server.py<em>111L</em></span>
+              <span class="hw-file"><img data-icon="md" src="assets/icons/md.svg" alt="" width="14" height="14" loading="lazy">arch_notes.md<em>48L</em></span>
+              <span class="hw-file"><img data-icon="jupyter" src="assets/icons/jupyter.svg" alt="" width="14" height="14" loading="lazy">notebook.ipynb<em>4 cells</em></span>
+              <span class="hw-file"><img data-icon="json" src="assets/icons/json.svg" alt="" width="14" height="14" loading="lazy">redaction.txt<em class="is-hit">2 red</em></span>
+              <span class="hw-file"><img data-icon="zip" src="assets/icons/zip.svg" alt="" width="14" height="14" loading="lazy">backup_copy.py<em>dedup</em></span>
+            </div>
+            <div class="hw-main">
+              <div class="hw-cmd"><b>$</b><span>python mcp_carbon_ingest.py ingest --roots ./examples</span></div>
+              <div class="hw-receipt">
+                <span><strong>STAGE 0 RECEIPT</strong> &middot; parity=5ee0d39b62b63f02 &middot; 0.31s</span>
+                <span>files=6 &middot; dedup_shunted=1 &middot; slices_160L=4 &middot; secrets_redacted=2</span>
+                <span>fts5_active=True &middot; status=SCRUBBED_SAFE_INDEX</span>
+              </div>
+              <div class="hw-hit">
+                <div class="hw-hit__head"><span>1. demo_mcp_server.py</span><span>L1-L111</span></div>
+                <span>AST: class VaultConfig | class LocalResearchMCPServer</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <!-- SCREEN 2: INTERACTIVE FLOORPLAN-STYLE 4-STEP WALK-ALONG (app-frame) -->
+  <section class="section" id="walkthrough" aria-labelledby="walkthrough-h">
+    <div class="wrap">
+      <div class="grid grid--top">
+        <div class="span-5">
+          <h2 id="walkthrough-h">Walk through all four vault stages</h2>
+        </div>
+        <div class="span-6 start-7 stack-4">
+          <p class="t-lead">Follow one workspace from raw folder scan to scrubbed SQLite lookup. Switch stages, test queries and copy universal commands.</p>
+          <a class="link" href="#commands">See all CLI flags</a>
+        </div>
+      </div>
+
+      <div class="ui ui-walkthrough app fill" data-visual role="region" aria-label="Interactive four-step Alpha MCP walk-along simulator">
+        <!-- Left Pane: Clickable 4-Step Tour + Live Workspace Ledger -->
+        <div class="app__pane app__pane--list">
+          <div class="wa-bar">
+            <span class="ui-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span><b>Walk-along</b> &middot; examples/sample_workspace</span>
+            <span class="sp"></span>
+            <span class="wa-badge" id="wa-step-badge">1 / 4</span>
+          </div>
+          <div class="wa-steps" role="group" aria-label="Alpha MCP walk-along stages" data-wa-steplist>
+            <button type="button" class="wa-step" id="wa-t1" aria-pressed="true" aria-current="step" aria-controls="wa-p1" data-wa-step="0">
+              <span class="wa-step__n">01</span>
+              <span class="wa-step__t">Point and inspect folders</span>
+              <span class="wa-step__d">Walk trees, .zip and .vhdx read-only</span>
+              <span class="wa-step__tag">Scan</span>
+            </button>
+            <button type="button" class="wa-step" id="wa-t2" aria-pressed="false" aria-controls="wa-p2" data-wa-step="1">
+              <span class="wa-step__n">02</span>
+              <span class="wa-step__t">Scrub secrets and slice</span>
+              <span class="wa-step__d">Nine regex rules and 160-line AST</span>
+              <span class="wa-step__tag">Sieve</span>
+            </button>
+            <button type="button" class="wa-step" id="wa-t3" aria-pressed="false" aria-controls="wa-p3" data-wa-step="2">
+              <span class="wa-step__n">03</span>
+              <span class="wa-step__t">Query BM25 FTS5</span>
+              <span class="wa-step__d">Porter rank search across slices</span>
+              <span class="wa-step__tag">FTS5</span>
+            </button>
+            <button type="button" class="wa-step" id="wa-t4" aria-pressed="false" aria-controls="wa-p4" data-wa-step="3">
+              <span class="wa-step__n">04</span>
+              <span class="wa-step__t">Wire MCP and push clean</span>
+              <span class="wa-step__d">Stdio bridge and hygiene gate</span>
+              <span class="wa-step__tag">Gate</span>
+            </button>
+          </div>
+          <div class="wa-ledger" aria-label="Workspace file states">
+            <div class="wa-ledger__head"><span>Workspace ledger (6 files)</span><span id="wa-ledger-mode">SHA-256 pass</span></div>
+            <div class="wa-file-row"><img data-icon="py" src="assets/icons/py.svg" alt="" width="15" height="15" loading="lazy"><span class="wa-file-row__name">demo_mcp_server.py</span><span class="wa-file-row__st is-ok" data-wa-file="server">mmap hashed</span></div>
+            <div class="wa-file-row"><img data-icon="py" src="assets/icons/py.svg" alt="" width="15" height="15" loading="lazy"><span class="wa-file-row__name">backup/demo_mcp_server_copy.py</span><span class="wa-file-row__st" data-wa-file="dup">dedup shunted</span></div>
+            <div class="wa-file-row"><img data-icon="md" src="assets/icons/md.svg" alt="" width="15" height="15" loading="lazy"><span class="wa-file-row__name">architecture_notes.md</span><span class="wa-file-row__st" data-wa-file="notes">48L + 4 URLs</span></div>
+            <div class="wa-file-row"><img data-icon="jupyter" src="assets/icons/jupyter.svg" alt="" width="15" height="15" loading="lazy"><span class="wa-file-row__name">notebook_sample.ipynb</span><span class="wa-file-row__st" data-wa-file="nb">base64 stripped</span></div>
+            <div class="wa-file-row"><img data-icon="json" src="assets/icons/json.svg" alt="" width="15" height="15" loading="lazy"><span class="wa-file-row__name">config_redaction_demo.txt</span><span class="wa-file-row__st is-accent" data-wa-file="secret">2 flags queued</span></div>
+            <div class="wa-file-row"><img data-icon="zip" src="assets/icons/zip.svg" alt="" width="15" height="15" loading="lazy"><span class="wa-file-row__name">archive_backup.vhdx / .zip</span><span class="wa-file-row__st" data-wa-file="archive">manifest only</span></div>
+          </div>
+        </div>
+
+        <!-- Right Pane: Active Interactive Step View -->
+        <div class="app__pane app__pane--open">
+          <div class="wa-head">
+            <span class="wa-dots" aria-hidden="true"><i class="is-on"></i><i></i><i></i><i></i></span>
+            <span class="wa-head__label" id="wa-active-title">Stage 1 of 4 &middot; Point and inspect folders</span>
+            <div class="wa-nav">
+              <button type="button" class="wa-mini-btn" id="wa-prev" disabled aria-label="Previous stage">Previous</button>
+              <button type="button" class="wa-mini-btn" id="wa-next" aria-label="Next stage">Next stage</button>
+            </div>
+          </div>
+
+          <div class="wa-body">
+            <!-- Panel 1: Point & Inspect -->
+            <div class="wa-panel" id="wa-p1" aria-labelledby="wa-t1">
+              <div class="wa-note">Point Alpha MCP at any mix of repos, notebooks and archives. Zero-copy mmap SHA-256 skips duplicate bytes while 7-Zip inspect mode reads .vhdx tables without unpacking gigabytes.</div>
+              <div class="wa-controls" role="group" aria-label="VHDX inspection mode">
+                <button type="button" class="wa-chip" data-vhdx="inspect" aria-pressed="true">--vhdx-mode inspect</button>
+                <button type="button" class="wa-chip" data-vhdx="mount-command" aria-pressed="false">--vhdx-mode mount-command</button>
+              </div>
+              <div class="wa-cmd-box">
+                <code id="wa-cmd-1">python mcp_carbon_ingest.py ingest --roots ./examples/sample_workspace --db ./vault.sqlite3 --vhdx-mode inspect</code>
+                <span class="copy">
+                  <button type="button" class="copy-button" command="--copy" commandfor="wa-cmd-1" aria-label="Copy Stage 1 ingest command">
+                    <svg class="ic-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>
+                    <svg class="ic-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg>
+                    <span>Copy</span>
+                  </button>
+                  <span class="tip" role="status"></span>
+                </span>
+              </div>
+              <div class="wa-out" id="wa-out-1">
+                <div class="wa-out__row"><span class="wa-out__k">STAGE 0 RECEIPT</span><span class="wa-out__v is-ok">parity=5ee0d39b62b63f02 &middot; 0.31s</span></div>
+                <div class="wa-out__row"><span class="wa-out__k">Indexed files and deduplication</span><span class="wa-out__v">files=6 &middot; dedup_shunted=1 &middot; slices_160L=4</span></div>
+                <div class="wa-out__row"><span class="wa-out__k">Harvested shortcuts and links</span><span class="wa-out__v">links=9 (Chrome .url + Markdown + .ipynb)</span></div>
+                <div class="wa-out__row"><span class="wa-out__k">Archive inspection safety</span><span class="wa-out__v is-ok" id="wa-vhdx-status">7z l -slt + stdlib zipfile (0 MB unpacked)</span></div>
+              </div>
+            </div>
+
+            <!-- Panel 2: Scrub Secrets & AST Slice -->
+            <div class="wa-panel" id="wa-p2" aria-labelledby="wa-t2" hidden>
+              <div class="wa-note">Before any text reaches slices_fts, nine regex rules scrub tokens line-by-line. Raw values never enter SQLite; secret_audit stores only the file path, rule name and line number.</div>
+              <div class="wa-controls" role="group" aria-label="Inspection preview">
+                <button type="button" class="wa-chip" data-sieve-view="diff" aria-pressed="true">Redaction diff (config_redaction_demo.txt)</button>
+                <button type="button" class="wa-chip" data-sieve-view="ast" aria-pressed="false">Python AST header (demo_mcp_server.py)</button>
+              </div>
+              <div class="wa-cmd-box">
+                <code id="wa-cmd-2">python mcp_carbon_ingest.py audit --db ./vault.sqlite3</code>
+                <span class="copy">
+                  <button type="button" class="copy-button" command="--copy" commandfor="wa-cmd-2" aria-label="Copy Stage 2 audit command">
+                    <svg class="ic-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>
+                    <svg class="ic-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg>
+                    <span>Copy</span>
+                  </button>
+                  <span class="tip" role="status"></span>
+                </span>
+              </div>
+              <div class="wa-out" id="wa-out-2-diff">
+                <div class="wa-diff-ln is-ctx"><span>3</span><span> </span><span>DEMO_MCP_ENDPOINT=https://api.example.com/v1/mcp</span></div>
+                <div class="wa-diff-ln is-del"><span>4</span><span>-</span><span>DEMO_API_KEY=demo_mcp_key_local_001</span></div>
+                <div class="wa-diff-ln is-add"><span>4</span><span>+</span><span>DEMO_API_KEY=REDACTED:ENV_SECRET</span></div>
+                <div class="wa-diff-ln is-del"><span>5</span><span>-</span><span>DEMO_WEBHOOK_SECRET=demo_webhook_signing_002</span></div>
+                <div class="wa-diff-ln is-add"><span>5</span><span>+</span><span>DEMO_WEBHOOK_SECRET=REDACTED:ENV_SECRET</span></div>
+              </div>
+              <div class="wa-out" id="wa-out-2-ast" hidden>
+                <div class="wa-out__row"><span class="wa-out__k">class VaultConfig</span><span class="wa-out__v">resolved_db (L14)</span></div>
+                <div class="wa-out__row"><span class="wa-out__k">class LocalResearchMCPServer</span><span class="wa-out__v">list_tools, query_slices, handle_request (L25)</span></div>
+                <div class="wa-out__row"><span class="wa-out__k">def format_receipt(files, slices, links, secrets)</span><span class="wa-out__v">L92 &middot; Slice 0 (L1-L111)</span></div>
+                <div class="wa-out__row"><span class="wa-out__k">Chunk boundary invariant</span><span class="wa-out__v is-ok">SLICE_MAX_LINES = 160</span></div>
+              </div>
+            </div>
+
+            <!-- Panel 3: Query BM25 FTS5 -->
+            <div class="wa-panel" id="wa-p3" aria-labelledby="wa-t3" hidden>
+              <div class="wa-note">Run Porter-stemmed BM25 search across every scrubbed 160-line slice. Try a preset query or type any term to filter indexed rows in real time.</div>
+              <div class="wa-search-row">
+                <label for="wa-q-input">FTS5 query</label>
+                <input id="wa-q-input" type="search" value="mcp" autocomplete="off">
+                <button type="button" class="wa-chip" data-q-preset="mcp" aria-pressed="true">mcp</button>
+                <button type="button" class="wa-chip" data-q-preset="sqlite" aria-pressed="false">sqlite</button>
+                <button type="button" class="wa-chip" data-q-preset="redacted" aria-pressed="false">redacted</button>
+              </div>
+              <div class="wa-cmd-box">
+                <code id="wa-cmd-3">python mcp_carbon_ingest.py query "mcp" --db ./vault.sqlite3 --top 5</code>
+                <span class="copy">
+                  <button type="button" class="copy-button" command="--copy" commandfor="wa-cmd-3" aria-label="Copy Stage 3 query command">
+                    <svg class="ic-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>
+                    <svg class="ic-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg>
+                    <span>Copy</span>
+                  </button>
+                  <span class="tip" role="status"></span>
+                </span>
+              </div>
+              <div class="wa-out" id="wa-q-results" aria-live="polite">
+                <div class="wa-hit-card">
+                  <div class="wa-hit-card__top"><span>1. examples/sample_workspace/demo_mcp_server.py</span><span>L1-L111</span></div>
+                  <span class="wa-hit-card__ast">AST: class VaultConfig | class LocalResearchMCPServer | def query_slices</span>
+                  <span class="wa-hit-card__snip">Read-only <mark>MCP</mark> tool router exposing deterministic BM25 slice search over SQLite WAL.</span>
+                </div>
+                <div class="wa-hit-card">
+                  <div class="wa-hit-card__top"><span>2. examples/sample_workspace/architecture_notes.md</span><span>L1-L48</span></div>
+                  <span class="wa-hit-card__ast">Links harvested: modelcontextprotocol.io &middot; sqlite.org/fts5.html</span>
+                  <span class="wa-hit-card__snip">Stage 0 local <mark>MCP</mark> vault keeps 160-line slices indexed without running an embedding server.</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Panel 4: Wire to MCP & Push Clean -->
+            <div class="wa-panel" id="wa-p4" aria-labelledby="wa-t4" hidden>
+              <div class="wa-note">Wire the local reader to your MCP client with universal home-relative paths, then verify your repository ignores local SQLite vaults and passes strict hygiene checks.</div>
+              <div class="wa-controls" role="group" aria-label="MCP client setup">
+                <button type="button" class="wa-chip" data-client="claude" aria-pressed="true">Claude Code</button>
+                <button type="button" class="wa-chip" data-client="codex" aria-pressed="false">Codex CLI</button>
+                <button type="button" class="wa-chip" data-client="antigravity" aria-pressed="false">Antigravity</button>
+              </div>
+              <div class="wa-cmd-box">
+                <code id="wa-cmd-4">claude mcp add alpha-vault -- python ~/alpha-mcp/examples/sample_workspace/demo_mcp_server.py</code>
+                <span class="copy">
+                  <button type="button" class="copy-button" command="--copy" commandfor="wa-cmd-4" aria-label="Copy Stage 4 MCP wiring command">
+                    <svg class="ic-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>
+                    <svg class="ic-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg>
+                    <span>Copy</span>
+                  </button>
+                  <span class="tip" role="status"></span>
+                </span>
+              </div>
+              <div class="wa-out">
+                <div class="wa-check-list">
+                  <div class="wa-check-item"><b>.gitignore vault guard</b><span>*.sqlite3*, *.vhdx, *.zip excluded</span></div>
+                  <div class="wa-check-item"><b>Credential sieve audit</b><span>0 raw values in slices_fts</span></div>
+                  <div class="wa-check-item"><b>Strict pre-push gate</b><span>PUBLIC_PUSH_GATE: PASS (errors=0)</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCREENS 3 & 4: PIPELINE 2x2 (g2 + fluted-glass card ground + hover-pulsing diagram) -->
+  <section class="section g2" id="pipeline" aria-labelledby="pipeline-h">
+    <div class="wrap">
+      <div class="group">
+        <div class="section-head">
+          <h2 id="pipeline-h">Alpha MCP pipeline stages. <span class="muted">Deterministic Python handles the reading.</span></h2>
+          <a class="link" href="#walkthrough">Open the walk-along</a>
+        </div>
+        <div class="grid">
+          <article class="card card--row span-6 m-nolift">
+            <h3>Catalogs .zip and .vhdx manifests</h3>
+            <p>Stdlib zipfile and 7-Zip inspect mode list .zip and .vhdx entries. Gigabyte disk images stay unopened on disk.</p>
+            <div class="panel panel--flush" data-fx="fluted-glass" data-fx-seed="31" data-fx-params='{"speed":0}'>
+              <div class="stage stage--fade-br">
+                <div class="at-corner wide" style="--ax:28px;--ay:28px;--w:580px">
+                  <div class="ui ui-files" data-ui="files" data-reading="Indexing {n} of {total}" data-ui-still>
+                    <div class="ui-files__status"><span class="ui-dot"></span><span data-files-status>6 workspace files cataloged</span></div>
+                    <ul class="ui-files__grid">
+                      <li class="ui-file is-done">
+                        <span class="ui-file__icon"><img data-icon="py" src="assets/icons/py.svg" alt="" width="24" height="24" loading="lazy"></span>
+                        <span class="ui-file__name">server.py</span>
+                        <span class="ui-file__kind">Python AST</span>
+                        <span class="ui-file__bar"><i></i></span>
+                        <span class="ui-file__check"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.2 2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                      </li>
+                      <li class="ui-file is-done">
+                        <span class="ui-file__icon"><img data-icon="jupyter" src="assets/icons/jupyter.svg" alt="" width="24" height="24" loading="lazy"></span>
+                        <span class="ui-file__name">notebook.ipynb</span>
+                        <span class="ui-file__kind">Jupyter cells</span>
+                        <span class="ui-file__bar"><i></i></span>
+                        <span class="ui-file__check"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.2 2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                      </li>
+                      <li class="ui-file is-done">
+                        <span class="ui-file__icon"><img data-icon="md" src="assets/icons/md.svg" alt="" width="24" height="24" loading="lazy"></span>
+                        <span class="ui-file__name">notes.md</span>
+                        <span class="ui-file__kind">Markdown</span>
+                        <span class="ui-file__bar"><i></i></span>
+                        <span class="ui-file__check"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.2 2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                      </li>
+                      <li class="ui-file is-done">
+                        <span class="ui-file__icon"><img data-icon="zip" src="assets/icons/zip.svg" alt="" width="24" height="24" loading="lazy"></span>
+                        <span class="ui-file__name">archive.zip</span>
+                        <span class="ui-file__kind">ZIP list</span>
+                        <span class="ui-file__bar"><i></i></span>
+                        <span class="ui-file__check"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.2 2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                      </li>
+                      <li class="ui-file is-done">
+                        <span class="ui-file__icon"><img data-icon="json" src="assets/icons/json.svg" alt="" width="24" height="24" loading="lazy"></span>
+                        <span class="ui-file__name">report.json</span>
+                        <span class="ui-file__kind">JSON</span>
+                        <span class="ui-file__bar"><i></i></span>
+                        <span class="ui-file__check"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.2 2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                      </li>
+                      <li class="ui-file is-done">
+                        <span class="ui-file__icon"><img data-icon="sqlite" src="assets/icons/sqlite.svg" alt="" width="24" height="24" loading="lazy"></span>
+                        <span class="ui-file__name">vault.sqlite3</span>
+                        <span class="ui-file__kind">SQLite WAL</span>
+                        <span class="ui-file__bar"><i></i></span>
+                        <span class="ui-file__check"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.2 2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <article class="card card--row span-6 m-nolift">
+            <h3>Scrubs nine API key patterns</h3>
+            <p>Line-by-line regex rules replace keys and tokens before FTS5 writes. Audit rows store only path and line.</p>
+            <div class="panel panel--flush" data-fx="fluted-glass" data-fx-seed="32" data-fx-params='{"speed":0}'>
+              <div class="stage stage--fade-b">
+                <div class="at-corner fit" style="--ax:28px;--ay:28px;--fit-max:480px">
+                  <div class="ui ui-panel ui-diff" data-ui="diff-review" data-ui-still>
+                    <div class="ui-diff__head">
+                      <svg class="ui-icon ui-diff__fold" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6.25 3.5 3.5 3.5-3.5"/></svg>
+                      <span class="ui-diff__tool" aria-hidden="true"><img data-icon="py" src="assets/icons/py.svg" alt="" width="16" height="16" loading="lazy"></span>
+                      <span class="ui-diff__repo">alpha-mcp</span><i class="ui-diff__slash" aria-hidden="true">/</i>
+                      <span class="ui-diff__path"><span class="ui-diff__dir">demo/</span><b>redaction.txt</b></span>
+                      <span class="ui-spacer"></span>
+                      <span class="ui-diff__stat"><b class="is-add">+2</b><b class="is-del">&minus;2</b></span>
+                    </div>
+                    <div class="ui-diff__hunk"><span>@@ -3,3 +3,3 @@</span> <em class="ui-diff__sig">scrub_secrets(raw_text)</em></div>
+                    <div class="ui-diff__lines">
+                      <div class="ui-diff__ln"><i>3</i><i>3</i><span class="ui-diff__code" data-i="0">DEMO_MCP_ENDPOINT=<span class="s">https://api.example.com/v1</span></span></div>
+                      <div class="ui-diff__ln is-del"><i>4</i><i></i><span class="ui-diff__code" data-i="0">DEMO_API_KEY=<mark class="ui-diff__w">demo_mcp_key_local_001</mark></span></div>
+                      <div class="ui-diff__ln is-add"><i></i><i>4</i><span class="ui-diff__code" data-i="0">DEMO_API_KEY=<mark class="ui-diff__w">REDACTED:ENV_SECRET</mark></span></div>
+                      <div class="ui-diff__ln is-del"><i>5</i><i></i><span class="ui-diff__code" data-i="0">DEMO_WEBHOOK_SECRET=<mark class="ui-diff__w">demo_signing_002</mark></span></div>
+                      <div class="ui-diff__ln is-add"><i></i><i>5</i><span class="ui-diff__code" data-i="0">DEMO_WEBHOOK_SECRET=<mark class="ui-diff__w">REDACTED:ENV_SECRET</mark></span></div>
+                      <div class="ui-diff__thread">
+                        <div class="ui-diff__by">
+                          <span class="ui-avatar">S0</span>
+                          <span class="ui-diff__name">Stage 0 Sieve</span>
+                          <span class="ui-diff__time">pre-FTS</span>
+                        </div>
+                        <div class="ui-diff__msg">Matched <code>ENV_SECRET</code> on lines 4 and 5; logged in <code>secret_audit</code>.</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <div class="grid">
+        <article class="card card--row span-6 m-nolift">
+          <h3>Splits files into SQLite FTS5 lanes</h3>
+          <p>Parallel workers hash every file via mmap SHA-256, chunk text at 160 lines and extract Python AST headers.</p>
+          <div class="panel panel--flush panel--dg">
+            <div class="dg" data-diagram data-dg-still><script type="application/json">{
+              "layout": "lanes",
+              "curve": "curve",
+              "ground": "dots",
+              "motion": { "cycle": 3.2 },
+              "alt": "One workspace folder flows into the Python Stage 0 worker, which writes to files, 160-line FTS5 slices and secret audit tables in parallel.",
+              "input": { "label": "Folders", "meta": "6 files" },
+              "core": { "label": "Stage 0", "tone": "plain" },
+              "lanes": [
+                { "label": "Files", "meta": "SHA-256", "done": true },
+                { "label": "Slices", "meta": "160L", "done": true },
+                { "label": "Audit", "meta": "9 rules", "done": true }
+              ]
+            }</script></div>
+          </div>
+        </article>
+
+        <article class="card card--row span-6 m-nolift">
+          <h3>Prints a Stage 0 receipt under 300 tokens</h3>
+          <p>Each ingest run reports parity hash, file count, deduplicated skips and redaction status in three compact lines.</p>
+          <div class="panel panel--flush" data-fx="fluted-glass" data-fx-seed="34" data-fx-params='{"speed":0}'>
+            <div class="stage">
+              <div class="at-rise fit" style="--ax:28px;--ay:28px;--fit-max:440px">
+                <div class="ui ui-panel ui-term" data-ui="terminal-run" data-ui-still>
+                  <div class="ui-term__head">
+                    <span class="ui-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span class="ui-term__title">alpha-mcp</span>
+                    <span class="ui-meta">ingest</span>
+                    <span class="ui-spacer"></span>
+                    <span class="ui-chip ui-chip--plain ui-term__branch">main</span>
+                  </div>
+                  <div class="ui-term__screen" data-term-screen>
+                    <div class="ui-term__track" data-term-track>
+                      <div class="ui-term__ln ui-term__cmd"><span class="ui-term__cwd">~</span><span class="ui-term__sig">$</span><span class="ui-term__typed">python mcp_carbon_ingest.py</span></div>
+                      <div class="ui-term__ln ui-term__meter"><span class="ui-term__bar" style="--p:1"><i></i></span><span class="ui-term__count">6 of 6 files</span></div>
+                      <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">demo_server.py</span><span class="ui-term__n">1 slice</span><span class="ui-term__t">AST</span></div>
+                      <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">backup_copy.py</span><span class="ui-term__n">dup</span><span class="ui-term__t">skip</span></div>
+                      <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">redaction.txt</span><span class="ui-term__n">2 hits</span><span class="ui-term__t">scrub</span></div>
+                      <div class="ui-term__ln ui-term__gap" aria-hidden="true"></div>
+                      <div class="ui-term__ln ui-term__sum"><span class="ui-term__key">Parity</span><span class="ui-term__val">5ee0d39b62b63f02</span><span class="ui-term__dim">WAL</span></div>
+                      <div class="ui-term__ln ui-term__done"><span class="ui-term__ok"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.3 2.4 2.4 4.6-5"/></svg></span><b>SCRUBBED_SAFE_INDEX</b><span class="ui-term__dim">0.31s</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCREEN 5: DEALT MOMENT (word-highlight statement section) -->
+  <section class="section statement" id="local-first" data-moment="word-highlight" aria-label="Local boundary">
+    <div class="wrap">
+      <p class="t-label">Local boundary</p>
+      <p class="mo-wh__text">Every SHA-256 hash, Python AST header, regex redaction pass and BM25 query runs inside <strong>one stdlib script</strong> on your own disk. Raw secrets and multi-gigabyte disk images never enter <strong>agent context</strong>.</p>
+    </div>
+  </section>
+
+  <!-- SCREEN 6: ARCHITECTURE & INTEGRATIONS (split-text-left + hover-pulsing fanin diagram) -->
+  <section class="section" id="architecture" aria-labelledby="architecture-h">
+    <div class="wrap grid grid--top fill">
+      <div class="span-5 split-col">
+        <div class="section-head">
+          <h2 id="architecture-h">Feeds one portable SQLite vault</h2>
+          <p>Source code, Jupyter notebooks, Markdown notes, browser shortcuts and archive manifests converge into one WAL file any stdio MCP client can query.</p>
+        </div>
+        <ul class="rows rows--spec">
+          <li><span class="rows__name">Runtime</span><span class="rows__value">Python 3.10+ stdlib</span></li>
+          <li><span class="rows__name">Index engine</span><span class="rows__value">SQLite WAL + FTS5 BM25</span></li>
+          <li><span class="rows__name">Slice ceiling</span><span class="rows__value">160 lines per chunk</span></li>
+          <li><span class="rows__name">Secret sieve</span><span class="rows__value">9 pre-index patterns</span></li>
+        </ul>
+        <div class="split-col__end">
+          <a class="link" href="#commands">Copy CLI commands</a>
+        </div>
+      </div>
+      <div class="frame frame--split frame--fill frame--dg span-6 start-7">
+        <div class="dg" data-diagram data-dg-still><script type="application/json">{
+          "layout": "fanin",
+          "ground": "rings",
+          "motion": { "cycle": 3.4 },
+          "alt": "Python files, Jupyter notebooks, Markdown notes, JSON configs, ZIP archives and Git repositories flow into SQLite WAL and serve local MCP clients.",
+          "sources": [
+            { "label": "Python", "icon": "py", "sub": "AST + slices" },
+            { "label": "Jupyter", "icon": "jupyter", "sub": "Cells only" },
+            { "label": "Markdown", "icon": "md", "sub": "Docs + links" },
+            { "label": "JSON", "icon": "json", "sub": "Configs" },
+            { "label": "ZIP", "icon": "zip", "sub": "File list" },
+            { "label": "GitHub", "icon": "github", "sub": "Repos" }
+          ],
+          "target": { "label": "SQLite WAL", "icon": "sqlite" },
+          "then": { "label": "MCP clients", "icon": "claude-code", "meta": "BM25" }
+        }</script></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCREEN 7: UNIVERSAL CLI COMMANDS (tabs-tour) -->
+  <section class="section" id="commands" aria-labelledby="commands-h">
+    <div class="wrap grid grid--top fill">
+      <div class="span-5">
+        <div class="section-head">
+          <h2 id="commands-h">Alpha MCP CLI commands</h2>
+          <p class="muted">Identical flags on Windows, macOS and Linux with zero pip dependencies.</p>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Alpha MCP CLI subcommands">
+          <button class="tab" type="button" role="tab" id="cmd-t1" aria-selected="true" aria-controls="cmd-p1 cmd-s1">Index</button>
+          <button class="tab" type="button" role="tab" id="cmd-t2" aria-selected="false" aria-controls="cmd-p2 cmd-s2">Query</button>
+          <button class="tab" type="button" role="tab" id="cmd-t3" aria-selected="false" aria-controls="cmd-p3 cmd-s3">Audit</button>
+        </div>
+
+        <div class="cmd-panel" role="tabpanel" id="cmd-p1" aria-labelledby="cmd-t1">
+          <p>Walk one or more source folders, deduplicate identical hashes, scrub secrets and write 160-line FTS5 chunks into a single SQLite WAL file.</p>
+          <div class="ui ui-cli cmd-snippet">
+            <code id="cli-c1">python mcp_carbon_ingest.py ingest --roots ./examples/sample_workspace --db ./vault.sqlite3</code>
+            <span class="copy">
+              <button type="button" class="copy-button" command="--copy" commandfor="cli-c1" aria-label="Copy ingest command">
+                <svg class="ic-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>
+                <svg class="ic-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg>
+                <span>Copy</span>
+              </button>
+              <span class="tip" role="status"></span>
+            </span>
+          </div>
+          <a class="link" href="#walkthrough">Test ingest in the walk-along</a>
+        </div>
+
+        <div class="cmd-panel" role="tabpanel" id="cmd-p2" aria-labelledby="cmd-t2" hidden>
+          <p>Run any SQLite FTS5 boolean query across scrubbed slices. Each hit prints the source path, line range, Python AST header and highlighted context.</p>
+          <div class="ui ui-cli cmd-snippet">
+            <code id="cli-c2">python mcp_carbon_ingest.py query "stdio AND server" --db ./vault.sqlite3 --top 8</code>
+            <span class="copy">
+              <button type="button" class="copy-button" command="--copy" commandfor="cli-c2" aria-label="Copy query command">
+                <svg class="ic-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>
+                <svg class="ic-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg>
+                <span>Copy</span>
+              </button>
+              <span class="tip" role="status"></span>
+            </span>
+          </div>
+          <a class="link" href="#walkthrough">Run live query in the walk-along</a>
+        </div>
+
+        <div class="cmd-panel" role="tabpanel" id="cmd-p3" aria-labelledby="cmd-t3" hidden>
+          <p>Review redacted secret file paths, harvested notebook or repository URLs and cataloged .zip or .vhdx entries before publishing any workspace.</p>
+          <div class="ui ui-cli cmd-snippet">
+            <code id="cli-c3">python mcp_carbon_ingest.py audit --db ./vault.sqlite3</code>
+            <span class="copy">
+              <button type="button" class="copy-button" command="--copy" commandfor="cli-c3" aria-label="Copy audit command">
+                <svg class="ic-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>
+                <svg class="ic-ok" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg>
+                <span>Copy</span>
+              </button>
+              <span class="tip" role="status"></span>
+            </span>
+          </div>
+          <a class="link" href="#faq">Read security questions</a>
+        </div>
+      </div>
+
+      <div class="frame frame--split frame--fill span-6 start-7" data-fx="fluted-glass" data-fx-seed="36" data-fx-params='{"speed":0}'>
+        <div class="cmd-screen" id="cmd-s1">
+          <div class="stage">
+            <div class="at-rise fit" style="--ax:32px;--ay:36px;--fit-max:480px">
+              <div class="ui ui-panel ui-term" data-ui="terminal-run" data-ui-still>
+                <div class="ui-term__head">
+                  <span class="ui-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <span class="ui-term__title">alpha-mcp</span>
+                  <span class="ui-meta">ingest</span>
+                  <span class="ui-spacer"></span>
+                  <span class="ui-chip ui-chip--plain ui-term__branch">main</span>
+                </div>
+                <div class="ui-term__screen" data-term-screen>
+                  <div class="ui-term__track" data-term-track>
+                    <div class="ui-term__ln ui-term__cmd"><span class="ui-term__cwd">~</span><span class="ui-term__sig">$</span><span class="ui-term__typed">python mcp_carbon_ingest.py</span></div>
+                    <div class="ui-term__ln ui-term__meter"><span class="ui-term__bar" style="--p:1"><i></i></span><span class="ui-term__count">6 of 6 files</span></div>
+                    <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">demo_server.py</span><span class="ui-term__n">111L</span><span class="ui-term__t">AST</span></div>
+                    <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">arch_notes.md</span><span class="ui-term__n">48L</span><span class="ui-term__t">URLs</span></div>
+                    <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">notebook.ipynb</span><span class="ui-term__n">4 cells</span><span class="ui-term__t">ok</span></div>
+                    <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">redaction.txt</span><span class="ui-term__n">2 red</span><span class="ui-term__t">sieve</span></div>
+                    <div class="ui-term__ln ui-term__gap" aria-hidden="true"></div>
+                    <div class="ui-term__ln ui-term__sum"><span class="ui-term__key">Slices</span><span class="ui-term__val">4 FTS5 chunks</span><span class="ui-term__dim">(1 dup)</span></div>
+                    <div class="ui-term__ln ui-term__done"><span class="ui-term__ok"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.3 2.4 2.4 4.6-5"/></svg></span><b>Indexed</b><span class="ui-term__dim">0.31s</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cmd-screen" id="cmd-s2" hidden>
+          <div class="stage stage--fade-b">
+            <div class="at-rise fit" style="--ax:32px;--ay:48px;--fit-max:420px">
+              <div class="ui ui-panel ui-search" data-ui="search" data-ui-still>
+                <div class="ui-search__field">
+                  <svg class="ui-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
+                  <span class="ui-search__q"><span data-search-q>stdio AND server</span><i class="ui-search__caret"></i></span>
+                  <kbd class="ui-search__kbd">FTS5</kbd>
+                </div>
+                <div class="ui-search__group">BM25 slices (top 3)</div>
+                <ul class="ui-search__list" data-search-list>
+                  <li class="ui-search__row is-sel"><span class="ui-search__ico"><svg class="ui-icon" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></svg></span><span class="ui-search__t"><b>demo_server.py</b> &middot; LocalResearchMCPServer</span><span class="ui-search__m">L1-L111</span></li>
+                  <li class="ui-search__row"><span class="ui-search__ico"><svg class="ui-icon" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></svg></span><span class="ui-search__t"><b>arch_notes.md</b> &middot; stdio transport</span><span class="ui-search__m">L1-L48</span></li>
+                  <li class="ui-search__row"><span class="ui-search__ico"><svg class="ui-icon" viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></svg></span><span class="ui-search__t"><b>notebook.ipynb</b> &middot; BM25 cell 3</span><span class="ui-search__m">L1-L64</span></li>
+                </ul>
+                <div class="ui-search__foot"><span>Porter unicode61</span><span>Read-only SQLite</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="cmd-screen" id="cmd-s3" hidden>
+          <div class="stage">
+            <div class="at-rise fit" style="--ax:32px;--ay:36px;--fit-max:480px">
+              <div class="ui ui-panel ui-term" data-ui="terminal-run" data-ui-still>
+                <div class="ui-term__head">
+                  <span class="ui-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                  <span class="ui-term__title">alpha-mcp</span>
+                  <span class="ui-meta">audit</span>
+                  <span class="ui-spacer"></span>
+                  <span class="ui-chip ui-chip--plain ui-term__branch">main</span>
+                </div>
+                <div class="ui-term__screen">
+                  <div class="ui-term__track">
+                    <div class="ui-term__ln ui-term__cmd"><span class="ui-term__cwd">~</span><span class="ui-term__sig">$</span><span class="ui-term__typed">python mcp_carbon_ingest.py audit</span></div>
+                    <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">ENV_SECRET (2x) redaction.txt</span><span class="ui-term__t">scrub</span></div>
+                    <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">9 URLs harvested from docs</span><span class="ui-term__t">saved</span></div>
+                    <div class="ui-term__ln ui-term__log"><svg class="ui-term__tick" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 8.4 2.8 2.8 6.2-6.4"/></svg><span class="ui-term__path">Archive manifests (zip + vhdx)</span><span class="ui-term__t">ro</span></div>
+                    <div class="ui-term__ln ui-term__gap" aria-hidden="true"></div>
+                    <div class="ui-term__ln ui-term__done"><span class="ui-term__ok"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 8.3 2.4 2.4 4.6-5"/></svg></span><b>Audit verified</b><span class="ui-term__dim">0 raw values</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCREEN 8: FAQ (all answers open + stack icons) -->
+  <section class="section" id="faq" aria-labelledby="faq-h">
+    <div class="wrap grid grid--top">
+      <div class="span-5">
+        <div class="section-head">
+          <h2 id="faq-h">Questions</h2>
+          <p class="muted">How the SQLite vault handles secrets, disk images and MCP clients.</p>
+        </div>
+        <a class="link" href="mailto:hello@alpha-mcp.example">Email the maintainer</a>
+        <div class="faq-stack" aria-label="Local runtime and client stack">
+          <span class="ic-tile"><img data-icon="python" src="assets/icons/python.svg" alt="Python stdlib" width="28" height="28" loading="lazy"></span>
+          <span class="ic-tile ic-tile--wide"><img data-icon="sqlite" src="assets/icons/sqlite.svg" alt="SQLite WAL and FTS5" width="56" height="26" loading="lazy"></span>
+          <span class="ic-tile"><img data-icon="github" src="assets/icons/github.svg" alt="Git repositories" width="28" height="28" loading="lazy"></span>
+          <span class="ic-tile"><img data-icon="claude-code" src="assets/icons/claude-code.svg" alt="Stdio MCP clients" width="28" height="28" loading="lazy"></span>
+        </div>
+      </div>
+      <div class="span-6 start-7">
+        <div class="faq">
+          <div class="faq__item">
+            <h3>Does Alpha MCP upload files or secrets?</h3>
+            <p>No. Hashing, nine-rule redaction and FTS5 writes run locally in Python 3.10+.</p>
+          </div>
+          <div class="faq__item">
+            <h3>How does Alpha MCP inspect .vhdx and .zip archives?</h3>
+            <p>Inspect mode calls 7-Zip list output and zipfile without unpacking disk images.</p>
+          </div>
+          <div class="faq__item">
+            <h3>What does Alpha MCP leave out by design?</h3>
+            <p>No neural embeddings or cloud cluster; only BM25 keyword and Python AST search.</p>
+          </div>
+          <div class="faq__item">
+            <h3>Which MCP clients query the SQLite vault?</h3>
+            <p>Claude Code, Codex and Antigravity query the read-only WAL database via stdio.</p>
+          </div>
+          <div class="faq__item">
+            <h3>How do teams keep vaults out of Git?</h3>
+            <p>Ignore SQLite and archive files in .gitignore and run the pre-push hygiene gate.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- SCREEN 9: CLOSE (close-type) + DARK FOOTER (footer-dark) -->
+<footer class="footer closing footer--dark ground-inverse" id="contact" aria-labelledby="close-h">
+  <div class="wrap">
+    <div class="closing__cta close--type">
+      <div class="section-head">
+        <h2 id="close-h">Index your first workspace in one minute</h2>
+        <p>Python 3.10+ stdlib only. Zero pip installs or API keys needed.</p>
+      </div>
+      <a class="btn btn--primary btn--xl btn--wide" href="#walkthrough">Start the walk-along<svg class="m-arrow" viewBox="0 0 12 12" aria-hidden="true"><path class="m-arrow__stem" d="M1 6h8"/><path class="m-arrow__head" d="M4.5 2.5 8 6l-3.5 3.5"/></svg></a>
+    </div>
+    <div class="closing__links">
+      <div class="grid">
+        <div class="span-4 stack-4">
+          <a class="footer__mark" href="#top"><span class="mark" data-mark="dots" aria-hidden="true"></span>Alpha MCP</a>
+        </div>
+        <div class="span-2 footer__col">
+          <h3>Stages</h3>
+          <ul>
+            <li><a href="#walkthrough">Walk-along</a></li>
+            <li><a href="#pipeline">Pipeline</a></li>
+          </ul>
+        </div>
+        <div class="span-2 footer__col">
+          <h3>System</h3>
+          <ul>
+            <li><a href="#local-first">Local boundary</a></li>
+            <li><a href="#architecture">Vault</a></li>
+          </ul>
+        </div>
+        <div class="span-2 footer__col">
+          <h3>CLI</h3>
+          <ul>
+            <li><a href="#commands">Commands</a></li>
+            <li><a href="#faq">Questions</a></li>
+          </ul>
+        </div>
+        <div class="span-2 footer__col">
+          <h3>Contact</h3>
+          <ul>
+            <li><a href="mailto:hello@alpha-mcp.example">Email maintainer</a></li>
+            <li><a href="#top">Back to top</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer__legal">
+        <span>&copy; 2026 Eloquent &middot; Alpha MCP</span>
+        <div class="socials"></div>
+        <span class="credits">Product names and logos are trademarks of their owners.</span>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script type="module" src="assets/system.js"></script>
+<script type="module" src="assets/motion/motion.js"></script>
+<script type="module" src="assets/layout/layout.js"></script>
+<script type="module" src="assets/diagrams/mount.js"></script>
+<script type="module">
+/* Interactive 4-Step Walk-Along, Copy-Button & Nav Scroll-Spy Controller */
+(() => {
+  /* Active section indicator in top nav (passive scroll spy, zero IntersectionObserver on sections) */
+  const navLinks = [...document.querySelectorAll('.nav__links > .nav__item > a.nav__link[href^="#"]')];
+  const watched = navLinks.map((a) => ({ a, el: document.querySelector(a.getAttribute('href')) })).filter((x) => x.el);
+  if (watched.length) {
+    let raf = 0;
+    const syncNav = () => {
+      raf = 0;
+      const mid = window.innerHeight * 0.4;
+      let active = null;
+      for (const item of watched) {
+        const r = item.el.getBoundingClientRect();
+        if (r.top <= mid && r.bottom >= 80) active = item;
+      }
+      watched.forEach(({ a }) => {
+        if (active && a === active.a) a.setAttribute('aria-current', 'page');
+        else a.removeAttribute('aria-current');
+      });
+    };
+    window.addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(syncNav); }, { passive: true });
+    syncNav();
+  }
+
+  const timers = new WeakMap();
+  let lastMsg = '';
+
+  function legacyCopy(text) {
+    const field = Object.assign(document.createElement('textarea'), { value: text });
+    field.setAttribute('readonly', '');
+    field.style.cssText = 'position:fixed;inset-block-start:0;opacity:0';
+    document.body.append(field);
+    field.select();
+    try { return document.execCommand('copy'); } finally { field.remove(); }
+  }
+
+  function reportCopy(button, ok) {
+    const tip = button.nextElementSibling;
+    clearTimeout(timers.get(button));
+    button.removeAttribute('data-copied');
+    button.removeAttribute('data-failed');
+    let msg = ok ? 'Copied' : 'Copy failed';
+    if (msg === lastMsg) msg += '\u00A0';
+    lastMsg = msg;
+    if (tip) tip.textContent = '';
+    void button.offsetWidth;
+    button.setAttribute(ok ? 'data-copied' : 'data-failed', '');
+    if (tip) requestAnimationFrame(() => { tip.textContent = msg; });
+    timers.set(button, setTimeout(() => {
+      button.removeAttribute('data-copied');
+      button.removeAttribute('data-failed');
+      if (tip) tip.textContent = '';
+    }, 2000));
+  }
+
+  async function runCopy(button, target) {
+    const text = target.matches('input, textarea') ? target.value : target.innerText.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      reportCopy(button, true);
+    } catch {
+      reportCopy(button, legacyCopy(text));
+    }
+  }
+
+  if ('CommandEvent' in window) {
+    document.addEventListener('command', (ev) => {
+      if (ev.command === '--copy' && ev.source && ev.target) runCopy(ev.source, ev.target);
+    }, true);
+  } else {
+    document.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('button[command="--copy"]');
+      if (!btn) return;
+      const target = document.getElementById(btn.getAttribute('commandfor'));
+      if (target) runCopy(btn, target);
+    });
+  }
+
+  /* 4-step Walk-Along State Sync */
+  const list = document.querySelector('[data-wa-steplist]');
+  if (!list) return;
+  const steps = [...list.querySelectorAll('[data-wa-step]')];
+  const panels = steps.map((b) => document.getElementById(b.getAttribute('aria-controls')));
+  const prevBtn = document.getElementById('wa-prev');
+  const nextBtn = document.getElementById('wa-next');
+  const badge = document.getElementById('wa-step-badge');
+  const titleEl = document.getElementById('wa-active-title');
+  const ledgerMode = document.getElementById('wa-ledger-mode');
+  const dots = [...document.querySelectorAll('.wa-dots i')];
+
+  const TITLES = [
+    'Stage 1 of 4 \u00B7 Point and inspect folders',
+    'Stage 2 of 4 \u00B7 Scrub secrets and slice',
+    'Stage 3 of 4 \u00B7 Query BM25 FTS5',
+    'Stage 4 of 4 \u00B7 Wire MCP and push clean',
+  ];
+  const LEDGER = [
+    { mode: 'SHA-256 pass', server: ['mmap hashed', 'is-ok'], dup: ['dedup shunted', ''], notes: ['48L + 4 URLs', ''], nb: ['base64 stripped', ''], secret: ['2 flags queued', 'is-accent'], archive: ['manifest only', ''] },
+    { mode: 'Sieve + 160L AST', server: ['AST 3 symbols', 'is-ok'], dup: ['skipped (dup)', ''], notes: ['1 slice (48L)', ''], nb: ['1 slice (4 cells)', ''], secret: ['2 redacted', 'is-ok'], archive: ['metadata row', ''] },
+    { mode: 'BM25 Porter rank', server: ['rank #1 hit', 'is-accent'], dup: ['0 dup hits', ''], notes: ['rank #2 hit', 'is-ok'], nb: ['rank #3 hit', ''], secret: ['scrubbed hit', ''], archive: ['manifest match', ''] },
+    { mode: 'Pre-push hygiene', server: ['tracked clean', 'is-ok'], dup: ['tracked clean', 'is-ok'], notes: ['tracked clean', 'is-ok'], nb: ['tracked clean', 'is-ok'], secret: ['0 raw secrets', 'is-ok'], archive: ['gitignored', ''] },
+  ];
+
+  let current = 0;
+  function selectStep(idx) {
+    current = Math.max(0, Math.min(steps.length - 1, idx));
+    steps.forEach((btn, i) => {
+      const on = i === current;
+      btn.setAttribute('aria-pressed', String(on));
+      if (on) btn.setAttribute('aria-current', 'step');
+      else btn.removeAttribute('aria-current');
+      if (panels[i]) panels[i].hidden = !on;
+    });
+    if (badge) badge.textContent = `${current + 1} / 4`;
+    if (titleEl) titleEl.textContent = TITLES[current];
+    if (prevBtn) prevBtn.disabled = current === 0;
+    if (nextBtn) {
+      nextBtn.disabled = current === steps.length - 1;
+      nextBtn.textContent = current === steps.length - 1 ? 'Completed' : 'Next stage';
+    }
+    dots.forEach((d, i) => d.classList.toggle('is-on', i <= current));
+    const state = LEDGER[current];
+    if (ledgerMode) ledgerMode.textContent = state.mode;
+    for (const [key, [label, cls]] of Object.entries(state)) {
+      if (key === 'mode') continue;
+      const el = document.querySelector(`[data-wa-file="${key}"]`);
+      if (!el) continue;
+      el.textContent = label;
+      el.className = 'wa-file-row__st' + (cls ? ' ' + cls : '');
+    }
+  }
+
+  steps.forEach((btn, i) => {
+    btn.addEventListener('click', () => selectStep(i));
+    btn.addEventListener('keydown', (ev) => {
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowRight') { ev.preventDefault(); const n = (i + 1) % steps.length; steps[n].focus(); selectStep(n); }
+      else if (ev.key === 'ArrowUp' || ev.key === 'ArrowLeft') { ev.preventDefault(); const p = (i - 1 + steps.length) % steps.length; steps[p].focus(); selectStep(p); }
+      else if (ev.key === 'Home') { ev.preventDefault(); steps[0].focus(); selectStep(0); }
+      else if (ev.key === 'End') { ev.preventDefault(); steps[steps.length - 1].focus(); selectStep(steps.length - 1); }
+    });
+  });
+  prevBtn?.addEventListener('click', () => { if (current > 0) selectStep(current - 1); });
+  nextBtn?.addEventListener('click', () => { if (current < steps.length - 1) selectStep(current + 1); });
+
+  /* Stage 1: VHDX mode toggle */
+  const vhdxBtns = [...document.querySelectorAll('[data-vhdx]')];
+  const cmd1 = document.getElementById('wa-cmd-1');
+  const vhdxStatus = document.getElementById('wa-vhdx-status');
+  vhdxBtns.forEach(btn => btn.addEventListener('click', () => {
+    const mode = btn.dataset.vhdx;
+    vhdxBtns.forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+    if (cmd1) cmd1.textContent = `python mcp_carbon_ingest.py ingest --roots ./examples/sample_workspace --db ./vault.sqlite3 --vhdx-mode ${mode}`;
+    if (vhdxStatus) vhdxStatus.textContent = mode === 'inspect' ? '7z l -slt + stdlib zipfile (0 MB unpacked)' : 'Prints read-only Mount-DiskImage and wsl --mount';
+  }));
+
+  /* Stage 2: Diff vs AST toggle */
+  const sieveBtns = [...document.querySelectorAll('[data-sieve-view]')];
+  const diffBox = document.getElementById('wa-out-2-diff');
+  const astBox = document.getElementById('wa-out-2-ast');
+  sieveBtns.forEach(btn => btn.addEventListener('click', () => {
+    const view = btn.dataset.sieveView;
+    sieveBtns.forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+    if (diffBox) diffBox.hidden = view !== 'diff';
+    if (astBox) astBox.hidden = view !== 'ast';
+  }));
+
+  /* Stage 3: Live BM25 FTS5 query filter */
+  const SLICES = [
+    { path: 'examples/sample_workspace/demo_mcp_server.py', range: 'L1-L111', ast: 'AST: class VaultConfig | class LocalResearchMCPServer | def query_slices', text: 'Read-only MCP tool router exposing deterministic BM25 slice search over SQLite WAL.', tags: 'mcp sqlite wal bm25 fts5 stdio server ast python' },
+    { path: 'examples/sample_workspace/architecture_notes.md', range: 'L1-L48', ast: 'Links harvested: modelcontextprotocol.io \u00B7 sqlite.org/fts5.html', text: 'Stage 0 local MCP vault keeps 160-line slices indexed without running an embedding server.', tags: 'mcp sqlite fts5 notes links 160 slice architecture' },
+    { path: 'examples/sample_workspace/config_redaction_demo.txt', range: 'L1-L5', ast: 'secret_audit: ENV_SECRET (2x) scrubbed prior to FTS5 insert', text: 'DEMO_API_KEY=REDACTED:ENV_SECRET \u00B7 DEMO_WEBHOOK_SECRET=REDACTED:ENV_SECRET', tags: 'redacted secret sieve audit env_secret config key' },
+    { path: 'examples/sample_workspace/notebook_sample.ipynb', range: 'L1-L64', ast: 'Native stdlib .ipynb parser \u00B7 base64 image outputs stripped', text: 'Runs SQLite FTS5 Porter stemming across notebook code and markdown cells.', tags: 'sqlite notebook ipynb fts5 porter bm25 mcp cells' },
+  ];
+  const qInput = document.getElementById('wa-q-input');
+  const qOut = document.getElementById('wa-q-results');
+  const cmd3 = document.getElementById('wa-cmd-3');
+  const qPresets = [...document.querySelectorAll('[data-q-preset]')];
+
+  function renderQuery(raw) {
+    const q = (raw || '').trim();
+    const term = q.toLowerCase();
+    if (cmd3) cmd3.textContent = `python mcp_carbon_ingest.py query "${q || 'mcp'}" --db ./vault.sqlite3 --top 5`;
+    qPresets.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.qPreset === term)));
+    const matches = term ? SLICES.filter(s => (s.tags + ' ' + s.text + ' ' + s.path).toLowerCase().includes(term)) : SLICES;
+    if (!qOut) return;
+    if (!matches.length) {
+      qOut.innerHTML = '<div class="wa-hit-card"><div class="wa-hit-card__top"><span>No matching slices</span><span>0 hits</span></div><span class="wa-hit-card__snip">Try mcp, sqlite or redacted.</span></div>';
+      return;
+    }
+    const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const re = term ? new RegExp('(' + term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig') : null;
+    qOut.innerHTML = matches.slice(0, 2).map((m, idx) => {
+      const snip = re ? esc(m.text).replace(re, '<mark>$1</mark>') : esc(m.text);
+      return `<div class="wa-hit-card"><div class="wa-hit-card__top"><span>${idx + 1}. ${esc(m.path)}</span><span>${esc(m.range)}</span></div><span class="wa-hit-card__ast">${esc(m.ast)}</span><span class="wa-hit-card__snip">${snip}</span></div>`;
+    }).join('');
+  }
+  qInput?.addEventListener('input', () => renderQuery(qInput.value));
+  qPresets.forEach(btn => btn.addEventListener('click', () => {
+    if (qInput) qInput.value = btn.dataset.qPreset;
+    renderQuery(btn.dataset.qPreset);
+  }));
+
+  /* Stage 4: MCP client switcher */
+  const CLIENTS = {
+    claude: 'claude mcp add alpha-vault -- python ~/alpha-mcp/examples/sample_workspace/demo_mcp_server.py',
+    codex: 'codex mcp add alpha-vault -- python ~/alpha-mcp/examples/sample_workspace/demo_mcp_server.py',
+    antigravity: 'agy mcp add alpha-vault -- python ~/alpha-mcp/examples/sample_workspace/demo_mcp_server.py',
+  };
+  const clientBtns = [...document.querySelectorAll('[data-client]')];
+  const cmd4 = document.getElementById('wa-cmd-4');
+  clientBtns.forEach(btn => btn.addEventListener('click', () => {
+    const key = btn.dataset.client;
+    clientBtns.forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+    if (cmd4 && CLIENTS[key]) cmd4.textContent = CLIENTS[key];
+  }));
+
+  selectStep(0);
+})();
+</script>
+</body>
+</html>

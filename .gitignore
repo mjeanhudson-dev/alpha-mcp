@@ -1,0 +1,30 @@
+# Local SQLite vaults and WAL/SHM journals
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Local workstation audit outputs containing private folder/URL inventories
+# (Public end-user-agnostic demo report lives in examples/sample_ingest_report.json)
+ingest_report.json
+
+# Raw binary disk images, multi-MB PDFs, archive backups, and pickles
+*.vhdx
+*.vhd
+*.pdf
+*.zip
+*.pkl
+
+# Frontend design-verification caches, headless screenshots, and staging outputs
+.taste-skill/
+walk-along/.taste-skill/
+walk-along/shots/
+vhdx_selective_stage/
+
+# Python caches & virtual environments
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
