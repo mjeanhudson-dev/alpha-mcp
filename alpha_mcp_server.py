@@ -78,7 +78,7 @@ def _utc_iso() -> str:
 # ---------------------------------------------------------------------------
 
 REDACTIONS: tuple[tuple[str, re.Pattern[str], str], ...] = (
-    ("BEARER_TOKEN", re.compile(r"(Bearer\s+)[A-Za-z0-9._\-=/+]+", re.I), r"\1[REDACTED:BEARER_TOKEN]"),
+    ("BEARER_TOKEN", re.compile(r"(Bearer[ \t]+)[A-Za-z0-9._\-=/+]+", re.I), r"\1[REDACTED:BEARER_TOKEN]"),
     ("SENTRY_TOKEN", re.compile(r"(sntrys_)[A-Za-z0-9._\-=/+]+", re.I), r"\1[REDACTED:SENTRY_TOKEN]"),
     ("GOOGLE_API_KEY", re.compile(r"(AIza)[0-9A-Za-z._\-]{10,}"), r"\1[REDACTED:GOOGLE_API_KEY]"),
     ("GOOGLE_OAUTH_TOKEN", re.compile(r"AQ\.Ab8[0-9A-Za-z._\-]{15,}|ya29\.[0-9A-Za-z_\-]{20,}"), "[REDACTED:GOOGLE_OAUTH_TOKEN]"),
