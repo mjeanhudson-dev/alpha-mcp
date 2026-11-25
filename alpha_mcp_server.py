@@ -19,6 +19,8 @@ import argparse
 import base64
 import hashlib
 import hmac
+import html
+import http.cookies
 import http.server
 import json
 import os
@@ -46,6 +48,22 @@ MAX_ESCALATION_TOKENS = 6000
 MAX_SKILL_TOKENS = 4500
 MAX_HTTP_BODY_BYTES = 2 * 1024 * 1024
 HOME = Path.home()
+
+# SEP-1865 MCP App (Alpha MCP Workbench)
+APP_RESOURCE_URI = "ui://alpha-mcp/workbench.html"
+APP_MIME_TYPE = "text/html;profile=mcp-app"
+APP_HTML_DEFAULT_PATH = Path(__file__).resolve().parent / "app" / "dist" / "workbench.html"
+APP_MAX_BYTES = 10 * 1024 * 1024
+_INLINE_UI_META: dict[str, Any] = {"ui": {"resourceUri": APP_RESOURCE_URI}}
+_WORKBENCH_PANE_META: dict[str, Any] = {
+    "ui": {"resourceUri": APP_RESOURCE_URI},
+    "com.google.antigravity/ui": {
+        "entrypoints": [
+            {"type": "aux_pane", "title": "Alpha Workbench"},
+            {"type": "global", "title": "Alpha Workbench"},
+        ]
+    },
+}
 
 SUPPORTED_PROTOCOL_VERSIONS: list[str] = [
     "2026-07-28",
@@ -143,7 +161,15 @@ APEX_PROVIDER_MODELS: dict[str, str] = {
     "anthropic": "claude-opus-5-5",
     "openai": "gpt-5-pro-high",
 }
-BANNED_LOW_POLY_TOKENS: tuple[str, ...] = ("flash", "lite", "mini", "haiku", "nano", "small")
+_BANNED_LOW_POLY_RE = re.compile(
+    r"(?:^|[-_.:/\s])(flash|lite|mini|haiku|nano|small|worker)(?:$|[-_.:/\s0-9])",
+    re.IGNORECASE,
+)
+
+
+def _is_low_poly_tier(model: str) -> bool:
+    norm = (model or "").strip().lower()
+    return bool(norm) and bool(_BANNED_LOW_POLY_RE.search(norm))
 
 
 def enforce_apex_shunt(model: str, provider: str = "google") -> tuple[str, bool]:
@@ -153,8 +179,7 @@ def enforce_apex_shunt(model: str, provider: str = "google") -> tuple[str, bool]
     raw = (model or "").strip()
     if not raw:
         return apex_model, True
-    lower = raw.lower()
-    if any(tok in lower for tok in BANNED_LOW_POLY_TOKENS):
+    if _is_low_poly_tier(raw):
         return apex_model, True
     return raw, False
 
@@ -464,8 +489,13 @@ def tool_edge_route(
     }
 
 
-def tool_vertex_query(prompt: str, model: str = "gemini-4-neon", max_tokens: int = 512) -> dict[str, Any]:
-    resolved_model, shunt_applied = enforce_apex_shunt(model, provider="google")
+_KEYLESS_TOKEN_CACHE: dict[str, Any] = {"token": "", "expires_at": 0.0}
+_KEYLESS_TOKEN_LOCK = threading.Lock()
+
+
+def tool_vertex_query(prompt: str, model: str = "", max_tokens: int = 512) -> dict[str, Any]:
+    req_model = (model or "").strip() or (os.environ.get("NEXUS_VERTEX_MODEL", "").strip() or APEX_PROVIDER_MODELS["google"])
+    resolved_model, shunt_applied = enforce_apex_shunt(req_model, provider="google")
     if shunt_applied:
         with _STATE_LOCK:
             _TELEMETRY["apex_shunts_applied"] += 1
@@ -474,35 +504,44 @@ def tool_vertex_query(prompt: str, model: str = "gemini-4-neon", max_tokens: int
     if not project or not sa:
         return {
             "status": "NOT_CONFIGURED",
-            "requested_model": model,
+            "requested_model": req_model,
             "resolved_model": resolved_model,
             "shunt_applied": shunt_applied,
             "hint": "Set GOOGLE_CLOUD_PROJECT and GOOGLE_IMPERSONATE_SERVICE_ACCOUNT (keyless impersonation via gcloud).",
         }
-    gcloud = shutil.which("gcloud.cmd") or shutil.which("gcloud")
-    if not gcloud:
-        return {
-            "status": "ERROR",
-            "requested_model": model,
-            "resolved_model": resolved_model,
-            "shunt_applied": shunt_applied,
-            "error": "gcloud CLI not found",
-        }
-    tok = subprocess.run(
-        [gcloud, "auth", "print-access-token", f"--impersonate-service-account={sa}"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    ).stdout.strip()
-    if len(tok) < 20:
-        return {
-            "status": "ERROR",
-            "requested_model": model,
-            "resolved_model": resolved_model,
-            "shunt_applied": shunt_applied,
-            "error": "token mint failed; check serviceAccountTokenCreator permission",
-        }
+    now = time.time()
+    tok = ""
+    with _KEYLESS_TOKEN_LOCK:
+        if _KEYLESS_TOKEN_CACHE["token"] and now < float(_KEYLESS_TOKEN_CACHE["expires_at"]):
+            tok = str(_KEYLESS_TOKEN_CACHE["token"])
+    if not tok:
+        gcloud = shutil.which("gcloud.cmd") or shutil.which("gcloud")
+        if not gcloud:
+            return {
+                "status": "ERROR",
+                "requested_model": req_model,
+                "resolved_model": resolved_model,
+                "shunt_applied": shunt_applied,
+                "error": "gcloud CLI not found",
+            }
+        tok = subprocess.run(
+            [gcloud, "auth", "print-access-token", f"--impersonate-service-account={sa}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        ).stdout.strip()
+        if len(tok) < 20:
+            return {
+                "status": "ERROR",
+                "requested_model": req_model,
+                "resolved_model": resolved_model,
+                "shunt_applied": shunt_applied,
+                "error": "token mint failed; check serviceAccountTokenCreator permission",
+            }
+        with _KEYLESS_TOKEN_LOCK:
+            _KEYLESS_TOKEN_CACHE["token"] = tok
+            _KEYLESS_TOKEN_CACHE["expires_at"] = now + 3300.0
     url = (
         f"https://aiplatform.googleapis.com/v1/projects/{urllib.parse.quote(project)}/locations/global"
         f"/publishers/google/models/{urllib.parse.quote(resolved_model)}:generateContent"
@@ -533,7 +572,7 @@ def tool_vertex_query(prompt: str, model: str = "gemini-4-neon", max_tokens: int
             exc.close()
         return {
             "status": "ERROR",
-            "requested_model": model,
+            "requested_model": req_model,
             "resolved_model": resolved_model,
             "shunt_applied": shunt_applied,
             "error": f"HTTP {exc.code}: {err_body}",
@@ -541,7 +580,7 @@ def tool_vertex_query(prompt: str, model: str = "gemini-4-neon", max_tokens: int
     parts = (((data.get("candidates") or [{}])[0]).get("content") or {}).get("parts") or []
     return {
         "status": "OK",
-        "requested_model": model,
+        "requested_model": req_model,
         "model": resolved_model,
         "resolved_model": resolved_model,
         "shunt_applied": shunt_applied,
@@ -837,6 +876,7 @@ _ANN = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, 
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "stage0_vault_fts_query",
+        "_meta": _INLINE_UI_META,
         "description": "BM25 FTS5 search over the redacted research vault.",
         "annotations": {**_ANN, "title": "Vault FTS Query"},
         "inputSchema": _schema(
@@ -846,6 +886,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "stage0_vault_manifest_lookup",
+        "_meta": _INLINE_UI_META,
         "description": "Inspect vault counts and VHDX/ZIP/link/secret-audit manifests (metadata only).",
         "annotations": {**_ANN, "title": "Vault Manifest Lookup"},
         "inputSchema": _schema(
@@ -858,6 +899,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "stage0_ast_slice_and_parity",
+        "_meta": _INLINE_UI_META,
         "description": "Read a file as a <=160-line slice with SHA-256 dedup; credential files are blocked.",
         "annotations": {**_ANN, "title": "Slice With Secret Airlock"},
         "inputSchema": _schema(
@@ -881,6 +923,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "tandem_edge_route",
+        "_meta": _INLINE_UI_META,
         "description": "Thermal (quintic 32-42C ramp) and VRAM headroom router for local edge tasks; escalates multi_turn to gemini-4-neon.",
         "annotations": {**_ANN, "title": "Edge Thermal/VRAM Router"},
         "inputSchema": _schema(
@@ -907,6 +950,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "apex_contactor_route_packet",
+        "_meta": _INLINE_UI_META,
         "description": "Across-the-Line Apex Contactor (NEXUS_FLASH_SHUNT=1); shunts banned low-poly tiers to provider Apex models with <=6,000-token escalation packet cap.",
         "annotations": {**_ANN, "title": "Across-the-Line Apex Contactor"},
         "inputSchema": _schema(
@@ -920,6 +964,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "exodia_compaction_gate",
+        "_meta": _INLINE_UI_META,
         "description": "Evaluates Cache_Reads/Cache_Writes >= 25.0:1 and turns >= 15; emits 3-line taint-preserving SHA-256 delta receipt.",
         "annotations": {**_ANN, "title": "Exodia 25:1 Compaction Gate"},
         "inputSchema": _schema(
@@ -949,6 +994,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "sovereign_dual_modality_status",
+        "_meta": _WORKBENCH_PANE_META,
         "description": "Return Sovereign Dual-Modality MCP v2.0 status, pinned 10-tool order, SEP-2640 skills, A2A signature, and $0/mo tier inventory.",
         "annotations": {**_ANN, "title": "Sovereign Dual-Modality Status"},
         "inputSchema": _schema({}),
@@ -998,10 +1044,31 @@ RESOURCES: list[dict[str, str]] = [
         "description": "Live slice parity hit/miss counters, Apex Contactor shunt metrics, and Exodia 25:1 compaction gate status.",
         "mimeType": "application/json",
     },
+    {
+        "uri": APP_RESOURCE_URI,
+        "name": "Alpha MCP Workbench",
+        "description": "Interactive SEP-1865 MCP App for Stage 0 Vault FTS5 search, manifest/secret-audit exploration, <=160-line AST slice viewing, and Sovereign/Exodia telemetry.",
+        "mimeType": APP_MIME_TYPE,
+        "_meta": {"ui": {"prefersBorder": False}},
+    },
 ]
 
 
 def read_resource(uri: str) -> tuple[dict[str, Any] | None, str | None]:
+    if uri == APP_RESOURCE_URI:
+        html_path = Path(os.environ.get("ALPHA_MCP_APP_HTML", "").strip() or APP_HTML_DEFAULT_PATH).expanduser()
+        if not html_path.is_file():
+            return None, "Workbench bundle missing; run: npm install && npm run build in the app/ directory"
+        if html_path.stat().st_size > APP_MAX_BYTES:
+            return None, "Workbench bundle exceeds 10 MiB"
+        # Not redacted: the bundle is static code and redaction would corrupt it.
+        return {
+            "uri": uri,
+            "mimeType": APP_MIME_TYPE,
+            "text": html_path.read_text(encoding="utf-8"),
+            "_meta": {"ui": {"prefersBorder": False}},
+        }, None
+
     if uri == "alpha://genesis/anchor-t0":
         payload = {
             "genesis_coordinate": "t = 0",
@@ -1221,14 +1288,14 @@ def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
             res = fn(**call_args)
         except Exception as exc:
             res = {"status": "ERROR", "error": str(exc)}
-        return {
-            "jsonrpc": "2.0",
-            "id": mid,
-            "result": {
-                "content": [{"type": "text", "text": redact(json.dumps(_redact_obj(res), indent=2))}],
-                "isError": isinstance(res, dict) and res.get("status") == "ERROR",
-            },
+        redacted_obj = _redact_obj(res)
+        result: dict[str, Any] = {
+            "content": [{"type": "text", "text": redact(json.dumps(redacted_obj, indent=2))}],
+            "isError": isinstance(res, dict) and res.get("status") == "ERROR",
         }
+        if isinstance(redacted_obj, dict):
+            result["structuredContent"] = redacted_obj
+        return {"jsonrpc": "2.0", "id": mid, "result": result}
 
     if method == "resources/list":
         return {"jsonrpc": "2.0", "id": mid, "result": {"resources": RESOURCES}}
@@ -1254,7 +1321,7 @@ def handle(msg: dict[str, Any]) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# Hardened OAuth 2.1 PKCE S256 + RFC 7591 + RFC 7009 Broker
+# Hardened OAuth 2.1 PKCE S256 + RFC 7591 + RFC 7009 Broker (Cold-Start Safe)
 # ---------------------------------------------------------------------------
 
 def _pkce_s256(verifier: str) -> str:
@@ -1262,33 +1329,166 @@ def _pkce_s256(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-class OAuthPKCEBroker:
-    """Thread-safe in-memory OAuth 2.1 PKCE S256 broker with single-use codes, rotation, and revocation."""
+def _get_oauth_token_key() -> bytes:
+    """Derive a stable 32-byte HMAC key that survives Cloud Run scale-to-zero cold starts."""
+    for env_name in ("ALPHA_MCP_SIGNING_SECRET", "ALPHA_MCP_OAUTH_SECRET", "ALPHA_MCP_BEARER_TOKEN"):
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            return hashlib.sha256(f"alpha-mcp-oauth-v2:{val}".encode("utf-8")).digest()
+    return hashlib.sha256(b"alpha-mcp-oauth-v2:" + _BOOT_SIGNING_SECRET).digest()
 
-    def __init__(self, code_ttl: int = 300, access_ttl: int = 3600, refresh_ttl: int = 86400) -> None:
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(text: str) -> bytes | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    pad = "=" * (-len(s) % 4)
+    try:
+        return base64.urlsafe_b64decode(s + pad)
+    except Exception:
+        return None
+
+
+def _sign_stateless_token(prefix: str, payload: dict[str, Any]) -> str:
+    body_b64 = _b64url_encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    sig = hmac.new(_get_oauth_token_key(), f"{prefix}.{body_b64}".encode("ascii"), hashlib.sha256).digest()
+    return f"{prefix}.{body_b64}.{_b64url_encode(sig)}"
+
+
+def _verify_stateless_token(prefix: str, token: str) -> dict[str, Any] | None:
+    parts = (token or "").strip().split(".")
+    if len(parts) != 3 or parts[0] != prefix:
+        return None
+    body_b64, sig_b64 = parts[1], parts[2]
+    expected_sig = _b64url_encode(
+        hmac.new(_get_oauth_token_key(), f"{prefix}.{body_b64}".encode("ascii"), hashlib.sha256).digest()
+    )
+    if not hmac.compare_digest(sig_b64, expected_sig):
+        return None
+    raw = _b64url_decode(body_b64)
+    if raw is None:
+        return None
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _derive_client_secret(client_id: str) -> str:
+    digest = hmac.new(_get_oauth_token_key(), f"client_secret:{client_id}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"amcp_cs_{digest[:48]}"
+
+
+def _is_valid_redirect_uri(uri: str) -> bool:
+    u = (uri or "").strip()
+    if not u or len(u) > 2048 or any(ch.isspace() or ord(ch) < 32 for ch in u):
+        return False
+    parsed = urllib.parse.urlsplit(u)
+    if parsed.fragment:
+        return False
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if scheme == "https":
+        return True
+    if scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    return False
+
+
+def _extract_basic_client_credentials(headers: Any) -> tuple[str, str]:
+    auth = str(headers.get("Authorization") or "").strip()
+    if len(auth) <= 6 or auth[:6].lower() != "basic ":
+        return "", ""
+    raw = _b64url_decode(auth[6:].strip().replace("+", "-").replace("/", "_"))
+    if raw is None:
+        return "", ""
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "", ""
+    if ":" not in decoded:
+        return "", ""
+    cid, csec = decoded.split(":", 1)
+    return urllib.parse.unquote_plus(cid).strip(), urllib.parse.unquote_plus(csec).strip()
+
+
+class OAuthPKCEBroker:
+    """Thread-safe OAuth 2.1 PKCE S256 broker with stateless HMAC tokens (cold-start safe) and revocation."""
+
+    _SUPPORTED_AUTH_METHODS = ("none", "client_secret_post", "client_secret_basic")
+    _MAX_CLIENTS = 512
+    _MAX_REVOKED = 4096
+
+    def __init__(self, code_ttl: int = 300, access_ttl: int = 86400, refresh_ttl: int = 2592000) -> None:
         self._lock = threading.Lock()
         self._code_ttl = code_ttl
         self._access_ttl = access_ttl
         self._refresh_ttl = refresh_ttl
         self._clients: dict[str, dict[str, Any]] = {}
-        self._codes: dict[str, dict[str, Any]] = {}
-        self._access_tokens: dict[str, dict[str, Any]] = {}
-        self._refresh_tokens: dict[str, dict[str, Any]] = {}
+        self._consumed_code_jtis: set[str] = set()
+        self._revoked_jtis: set[str] = set()
 
-    def register_client(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _trim_set_locked(self, target: set[str], limit: int) -> None:
+        if len(target) > limit:
+            for item in list(target)[: len(target) - (limit // 2)]:
+                target.discard(item)
+
+    def get_client(self, client_id: str) -> dict[str, Any] | None:
+        cid = (client_id or "").strip()
+        if not cid:
+            return None
+        with self._lock:
+            rec = self._clients.get(cid)
+            return dict(rec) if rec is not None else None
+
+    def register_client(self, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        raw_uris = payload.get("redirect_uris")
+        if not isinstance(raw_uris, list) or not raw_uris or len(raw_uris) > 8:
+            return None, "redirect_uris must be a non-empty list of 1..8 valid HTTPS or loopback redirect URIs"
+        clean_uris: list[str] = []
+        for item in raw_uris:
+            if not isinstance(item, str) or not _is_valid_redirect_uri(item):
+                return None, "Each redirect_uri must be a valid https:// or loopback http:// URI without fragments"
+            clean_uris.append(item.strip())
+
+        req_method = str(payload.get("token_endpoint_auth_method") or "none").strip().lower()
+        if req_method not in self._SUPPORTED_AUTH_METHODS:
+            req_method = "none"
+
         cid = f"alpha-client-{secrets.token_hex(12)}"
-        rec = {
+        rec: dict[str, Any] = {
             "client_id": cid,
             "client_name": str(payload.get("client_name") or "alpha-mcp-client")[:128],
-            "redirect_uris": payload.get("redirect_uris") if isinstance(payload.get("redirect_uris"), list) else [],
+            "redirect_uris": clean_uris,
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
+            "token_endpoint_auth_method": req_method,
             "client_id_issued_at": int(time.time()),
         }
+        if req_method in ("client_secret_post", "client_secret_basic"):
+            rec["client_secret"] = _derive_client_secret(cid)
+            rec["client_secret_expires_at"] = 0
+
         with self._lock:
-            self._clients[cid] = rec
-        return rec
+            if len(self._clients) >= self._MAX_CLIENTS:
+                oldest = next(iter(self._clients))
+                self._clients.pop(oldest, None)
+            self._clients[cid] = dict(rec)
+        return rec, None
+
+    def verify_client_secret(self, client_id: str, client_secret: str) -> bool:
+        cid = (client_id or "").strip()
+        csec = (client_secret or "").strip()
+        if not cid or not csec or not cid.startswith("alpha-client-"):
+            return False
+        return hmac.compare_digest(csec, _derive_client_secret(cid))
 
     def issue_auth_code(
         self,
@@ -1298,81 +1498,138 @@ class OAuthPKCEBroker:
         code_challenge_method: str,
         scope: str = "mcp:read mcp:tools",
         resource: str = "",
+        allow_no_pkce: bool = False,
     ) -> tuple[str | None, str | None]:
-        if (code_challenge_method or "").strip() != "S256":
-            return None, "PKCE code_challenge_method must be S256"
-        if not code_challenge or len(code_challenge.strip()) < 32:
-            return None, "Valid PKCE S256 code_challenge is required"
-        code = secrets.token_urlsafe(32)
-        with self._lock:
-            self._codes[code] = {
-                "client_id": (client_id or "alpha-public-client").strip(),
-                "redirect_uri": (redirect_uri or "").strip(),
-                "code_challenge": code_challenge.strip(),
-                "scope": (scope or "mcp:read mcp:tools").strip(),
-                "resource": (resource or "").strip(),
-                "expires_at": time.time() + self._code_ttl,
-                "used": False,
-            }
-        return code, None
+        cc = (code_challenge or "").strip()
+        ccm = (code_challenge_method or "").strip()
+        if cc or not allow_no_pkce:
+            if ccm != "S256":
+                return None, "PKCE code_challenge_method must be S256"
+            if not cc or len(cc) < 32:
+                return None, "Valid PKCE S256 code_challenge is required"
+        client_rec = self.get_client(client_id)
+        auth_method = str(client_rec.get("token_endpoint_auth_method") or "none") if client_rec else "none"
+        payload = {
+            "jti": secrets.token_hex(16),
+            "typ": "ac",
+            "cid": (client_id or "alpha-public-client").strip(),
+            "ruri": (redirect_uri or "").strip(),
+            "cc": cc,
+            "am": auth_method,
+            "scp": (scope or "mcp:read mcp:tools").strip(),
+            "res": (resource or "").strip(),
+            "exp": int(time.time()) + self._code_ttl,
+        }
+        return _sign_stateless_token("amcp_ac", payload), None
 
     def exchange_code(
         self,
         code: str,
-        code_verifier: str,
+        code_verifier: str = "",
         client_id: str = "",
         redirect_uri: str = "",
+        client_secret: str = "",
     ) -> tuple[dict[str, Any] | None, str | None]:
         now = time.time()
+        rec = _verify_stateless_token("amcp_ac", code)
+        if rec is None or rec.get("typ") != "ac" or now > float(rec.get("exp") or 0):
+            return None, "Authorization code invalid, expired, or already consumed"
+        jti = str(rec.get("jti") or "")
         with self._lock:
-            rec = self._codes.get(code)
-            if rec is None or rec["used"] or now > rec["expires_at"]:
+            if not jti or jti in self._consumed_code_jtis:
                 return None, "Authorization code invalid, expired, or already consumed"
             # Mark single-use immediately to prevent replay or brute-force retries
-            rec["used"] = True
-            if client_id and rec["client_id"] and client_id != rec["client_id"]:
-                return None, "client_id mismatch"
-            if redirect_uri and rec["redirect_uri"] and redirect_uri != rec["redirect_uri"]:
-                return None, "redirect_uri mismatch"
-            try:
-                computed = _pkce_s256(code_verifier)
-            except UnicodeEncodeError:
-                return None, "Invalid code_verifier encoding"
-            if not hmac.compare_digest(computed, rec["code_challenge"]):
-                return None, "PKCE S256 verification failed"
-            return self._mint_token_pair_locked(rec["client_id"], rec["scope"], rec["resource"]), None
+            self._consumed_code_jtis.add(jti)
+            self._trim_set_locked(self._consumed_code_jtis, self._MAX_REVOKED)
 
-    def rotate_refresh_token(self, refresh_token: str) -> tuple[dict[str, Any] | None, str | None]:
+            rec_cid = str(rec.get("cid") or "")
+            if client_id and rec_cid and client_id != rec_cid:
+                return None, "client_id mismatch"
+            rec_ruri = str(rec.get("ruri") or "")
+            if redirect_uri and rec_ruri and redirect_uri != rec_ruri:
+                return None, "redirect_uri mismatch"
+
+            auth_method = str(rec.get("am") or "none")
+            secret_ok = self.verify_client_secret(rec_cid or client_id, client_secret) if client_secret else False
+            if auth_method in ("client_secret_post", "client_secret_basic") and not secret_ok:
+                return None, "Invalid client_secret"
+
+            rec_cc = str(rec.get("cc") or "")
+            if rec_cc:
+                if not code_verifier:
+                    return None, "code_verifier is required"
+                try:
+                    computed = _pkce_s256(code_verifier)
+                except UnicodeEncodeError:
+                    return None, "Invalid code_verifier encoding"
+                if not hmac.compare_digest(computed, rec_cc):
+                    return None, "PKCE S256 verification failed"
+            elif not secret_ok:
+                return None, "PKCE S256 verification required for public clients"
+
+            return self._mint_token_pair_locked(
+                rec_cid,
+                str(rec.get("scp") or "mcp:read mcp:tools"),
+                str(rec.get("res") or ""),
+            ), None
+
+    def rotate_refresh_token(
+        self,
+        refresh_token: str,
+        client_id: str = "",
+        client_secret: str = "",
+    ) -> tuple[dict[str, Any] | None, str | None]:
         now = time.time()
+        rec = _verify_stateless_token("amcp_rt", refresh_token)
+        if rec is None or rec.get("typ") != "rt" or now > float(rec.get("exp") or 0):
+            return None, "Refresh token invalid, expired, or revoked"
+        jti = str(rec.get("jti") or "")
+        rec_cid = str(rec.get("cid") or "")
+        if client_id and rec_cid and client_id != rec_cid:
+            return None, "client_id mismatch"
+        if client_secret and not self.verify_client_secret(rec_cid or client_id, client_secret):
+            return None, "Invalid client_secret"
         with self._lock:
-            rec = self._refresh_tokens.get(refresh_token)
-            if rec is None or rec["revoked"] or now > rec["expires_at"]:
+            if not jti or jti in self._revoked_jtis:
                 return None, "Refresh token invalid, expired, or revoked"
-            rec["revoked"] = True
-            old_access = rec.get("access_token")
-            if old_access and old_access in self._access_tokens:
-                self._access_tokens[old_access]["revoked"] = True
-            return self._mint_token_pair_locked(rec["client_id"], rec["scope"], rec["resource"]), None
+            self._revoked_jtis.add(jti)
+            old_at_jti = str(rec.get("at_jti") or "")
+            if old_at_jti:
+                self._revoked_jtis.add(old_at_jti)
+            self._trim_set_locked(self._revoked_jtis, self._MAX_REVOKED)
+            return self._mint_token_pair_locked(
+                rec_cid,
+                str(rec.get("scp") or "mcp:read mcp:tools"),
+                str(rec.get("res") or ""),
+            ), None
 
     def _mint_token_pair_locked(self, client_id: str, scope: str, resource: str) -> dict[str, Any]:
-        now = time.time()
-        access_tok = secrets.token_urlsafe(32)
-        refresh_tok = secrets.token_urlsafe(32)
-        self._access_tokens[access_tok] = {
-            "client_id": client_id,
-            "scope": scope,
-            "resource": resource,
-            "expires_at": now + self._access_ttl,
-            "revoked": False,
-        }
-        self._refresh_tokens[refresh_tok] = {
-            "client_id": client_id,
-            "scope": scope,
-            "resource": resource,
-            "access_token": access_tok,
-            "expires_at": now + self._refresh_ttl,
-            "revoked": False,
-        }
+        now = int(time.time())
+        at_jti = secrets.token_hex(16)
+        rt_jti = secrets.token_hex(16)
+        access_tok = _sign_stateless_token(
+            "amcp_at",
+            {
+                "jti": at_jti,
+                "typ": "at",
+                "cid": client_id,
+                "scp": scope,
+                "res": resource,
+                "exp": now + self._access_ttl,
+            },
+        )
+        refresh_tok = _sign_stateless_token(
+            "amcp_rt",
+            {
+                "jti": rt_jti,
+                "typ": "rt",
+                "cid": client_id,
+                "scp": scope,
+                "res": resource,
+                "at_jti": at_jti,
+                "exp": now + self._refresh_ttl,
+            },
+        )
         return {
             "access_token": access_tok,
             "token_type": "Bearer",
@@ -1384,22 +1641,26 @@ class OAuthPKCEBroker:
     def validate_access_token(self, token: str) -> bool:
         if not token:
             return False
-        now = time.time()
+        rec = _verify_stateless_token("amcp_at", token)
+        if rec is None or rec.get("typ") != "at" or time.time() > float(rec.get("exp") or 0):
+            return False
+        jti = str(rec.get("jti") or "")
         with self._lock:
-            rec = self._access_tokens.get(token)
-            return bool(rec is not None and not rec["revoked"] and now <= rec["expires_at"])
+            return bool(jti and jti not in self._revoked_jtis)
 
     def revoke_token(self, token: str) -> None:
         if not token:
             return
+        at_rec = _verify_stateless_token("amcp_at", token)
+        rt_rec = _verify_stateless_token("amcp_rt", token) if at_rec is None else None
         with self._lock:
-            if token in self._access_tokens:
-                self._access_tokens[token]["revoked"] = True
-            if token in self._refresh_tokens:
-                self._refresh_tokens[token]["revoked"] = True
-                linked = self._refresh_tokens[token].get("access_token")
-                if linked and linked in self._access_tokens:
-                    self._access_tokens[linked]["revoked"] = True
+            if at_rec and at_rec.get("jti"):
+                self._revoked_jtis.add(str(at_rec["jti"]))
+            if rt_rec and rt_rec.get("jti"):
+                self._revoked_jtis.add(str(rt_rec["jti"]))
+                if rt_rec.get("at_jti"):
+                    self._revoked_jtis.add(str(rt_rec["at_jti"]))
+            self._trim_set_locked(self._revoked_jtis, self._MAX_REVOKED)
 
 
 # ---------------------------------------------------------------------------
@@ -1449,14 +1710,93 @@ def _is_oauth_admin_authorized(headers: Any, params: dict[str, Any], require_aut
     if not _is_protected_http_request(headers, require_auth):
         return True
     env_oauth_secret = os.environ.get("ALPHA_MCP_OAUTH_SECRET", "").strip()
-    cand_secret = str(headers.get("X-Alpha-OAuth-Secret") or params.get("oauth_secret") or "").strip()
-    if env_oauth_secret and cand_secret and hmac.compare_digest(cand_secret, env_oauth_secret):
-        return True
     env_bearer = os.environ.get("ALPHA_MCP_BEARER_TOKEN", "").strip()
+    cand_secret = str(headers.get("X-Alpha-OAuth-Secret") or params.get("oauth_secret") or "").strip()
+    if cand_secret:
+        if env_oauth_secret and hmac.compare_digest(cand_secret, env_oauth_secret):
+            return True
+        if env_bearer and hmac.compare_digest(cand_secret, env_bearer):
+            return True
     cand_bearer = _extract_bearer_token(headers)
     if env_bearer and cand_bearer and hmac.compare_digest(cand_bearer, env_bearer):
         return True
     return False
+
+
+def _get_google_oauth_config() -> tuple[str, str, set[str]]:
+    cid = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    csec = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    allowed = {
+        e.strip().lower()
+        for e in os.environ.get("ALPHA_MCP_ALLOWED_EMAILS", "").split(",")
+        if e.strip()
+    }
+    return cid, csec, allowed
+
+
+def _google_signin_configured() -> bool:
+    cid, csec, allowed = _get_google_oauth_config()
+    return bool(cid and csec and allowed)
+
+
+def _read_cookie(headers: Any, name: str) -> str:
+    raw = str(headers.get("Cookie") or "").strip()
+    if not raw:
+        return ""
+    jar = http.cookies.SimpleCookie()
+    try:
+        jar.load(raw)
+    except http.cookies.CookieError:
+        return ""
+    morsel = jar.get(name)
+    return str(morsel.value).strip() if morsel is not None else ""
+
+
+def _exchange_google_code_for_userinfo(
+    code: str,
+    callback_uri: str,
+    client_id: str,
+    client_secret: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    form = urllib.parse.urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": callback_uri,
+        }
+    ).encode("utf-8")
+    tok_req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=form,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(tok_req, timeout=12) as resp:
+            tok_data = json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError) as exc:
+        return None, f"Google token exchange failed: {type(exc).__name__}"
+
+    access_token = str(tok_data.get("access_token") or "").strip()
+    if not access_token:
+        return None, "Google token response missing access_token"
+
+    info_req = urllib.request.Request(
+        "https://openidconnect.googleapis.com/v1/userinfo",
+        method="GET",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(info_req, timeout=12) as resp:
+            info_data = json.loads(resp.read().decode("utf-8", "replace"))
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError) as exc:
+        return None, f"Google userinfo lookup failed: {type(exc).__name__}"
+
+    if not isinstance(info_data, dict):
+        return None, "Invalid userinfo payload"
+    return info_data, None
 
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -1579,8 +1919,131 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    def _send_html(self, status: int, markup: str, extra_headers: dict[str, str] | None = None) -> None:
+        body = markup.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
+        )
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _render_oauth_consent_html(self, params: dict[str, Any], error_msg: str = "") -> str:
+        redirect_uri = str(params.get("redirect_uri") or "").strip()
+        host_label = urllib.parse.urlsplit(redirect_uri).netloc or redirect_uri
+        client_id = str(params.get("client_id") or "alpha-public-client").strip()
+        scope = str(params.get("scope") or "mcp:read mcp:tools").strip()
+        hidden_keys = (
+            "response_type",
+            "client_id",
+            "redirect_uri",
+            "state",
+            "scope",
+            "resource",
+            "code_challenge",
+            "code_challenge_method",
+        )
+        hidden_inputs = "\n".join(
+            f'<input type="hidden" name="{html.escape(k, quote=True)}" value="{html.escape(str(params.get(k) or ""), quote=True)}" />'
+            for k in hidden_keys
+            if params.get(k) is not None and str(params.get(k)) != ""
+        )
+        err_block = f'<p class="err" role="alert">{html.escape(error_msg)}</p>' if error_msg else ""
+        return (
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Alpha MCP Authorization</title><style>"
+            "body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0e14;color:#eef2f7;"
+            "font-family:system-ui,-apple-system,Segoe UI,sans-serif;padding:24px}"
+            ".card{width:100%;max-width:440px;background:#131823;border:1px solid #263042;border-radius:20px;padding:28px;"
+            "box-shadow:0 24px 60px rgba(0,0,0,.45)}"
+            "h1{margin:0 0 8px;font-size:1.25rem;letter-spacing:-.01em}"
+            ".meta{font-size:.9rem;color:#9fb0c8;margin:0 0 18px;line-height:1.5}"
+            ".pill{display:inline-block;background:#1b2434;border:1px solid #2e3d56;border-radius:10px;padding:6px 10px;"
+            "font-family:ui-monospace,Consolas,monospace;font-size:.82rem;color:#d8e3f2;word-break:break-all;margin-top:4px}"
+            "label{display:block;font-size:.88rem;font-weight:600;margin:16px 0 8px}"
+            "input[type=password]{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;"
+            "border:1px solid #33435e;background:#0a0d14;color:#f5f8fc;font-size:.95rem}"
+            ".err{margin:12px 0 0;padding:10px 12px;border-radius:10px;background:#3a161b;border:1px solid #8a2c38;color:#ffd5da;font-size:.88rem}"
+            ".row{display:flex;gap:10px;margin-top:20px}"
+            "button{flex:1;padding:12px 14px;border-radius:12px;border:0;font-weight:600;font-size:.95rem;cursor:pointer}"
+            ".ok{background:#4f8cff;color:#061020}.deny{background:#232c3d;color:#cfd9e8}"
+            "</style></head><body><main class='card'>"
+            "<h1>Authorize Alpha MCP Access</h1>"
+            f"<p class='meta'>An OAuth 2.1 client is requesting access to your Stage 0 Vault tools.<br>"
+            f"<span class='pill'>Redirect: {html.escape(host_label)}</span><br>"
+            f"<span class='pill'>Client: {html.escape(client_id)}</span><br>"
+            f"<span class='pill'>Scope: {html.escape(scope)}</span></p>"
+            f"{err_block}"
+            "<form method='post' action='/oauth/authorize' autocomplete='off'>"
+            "<input type='hidden' name='consent_ui' value='1' />"
+            f"{hidden_inputs}"
+            "<label for='oauth_secret'>Alpha MCP Bearer Token / OAuth Secret</label>"
+            "<input id='oauth_secret' name='oauth_secret' type='password' required autofocus placeholder='Paste your Alpha MCP token' />"
+            "<div class='row'>"
+            "<button class='ok' type='submit' name='decision' value='approve'>Approve &amp; Connect</button>"
+            "<button class='deny' type='submit' name='decision' value='deny' formnovalidate>Deny</button>"
+            "</div></form></main></body></html>"
+        )
+
+    def _render_oauth_message_html(self, title: str, message: str) -> str:
+        return (
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            f"<title>{html.escape(title)}</title><style>"
+            "body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0e14;color:#eef2f7;"
+            "font-family:system-ui,-apple-system,Segoe UI,sans-serif;padding:24px}"
+            ".card{width:100%;max-width:440px;background:#131823;border:1px solid #263042;border-radius:20px;padding:28px;"
+            "box-shadow:0 24px 60px rgba(0,0,0,.45)}"
+            "h1{margin:0 0 10px;font-size:1.25rem;letter-spacing:-.01em}"
+            "p{margin:0;font-size:.94rem;color:#b8c6db;line-height:1.55}"
+            "</style></head><body><main class='card'>"
+            f"<h1>{html.escape(title)}</h1>"
+            f"<p>{html.escape(message)}</p>"
+            "</main></body></html>"
+        )
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send_empty(204)
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        route = urllib.parse.urlsplit(self.path).path
+        if route in (
+            "/",
+            "/health",
+            "/status",
+            "/.well-known/agent-card.json",
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-protected-resource/mcp",
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration",
+            "/equations",
+            "/skills",
+        ):
+            self._send_empty(200, extra_headers={"Content-Type": "application/json; charset=utf-8"})
+            return
+        if route in ("/mcp", "/mcp/"):
+            srv: ThreadedHTTPServer = self.server  # type: ignore[assignment]
+            if not _is_authorized_http_request(self.headers, srv.oauth_broker, srv.require_auth):
+                base = self._base_url()
+                self._send_empty(
+                    401,
+                    extra_headers={
+                        "WWW-Authenticate": f'Bearer resource_metadata="{base}/.well-known/oauth-protected-resource"'
+                    },
+                )
+                return
+            self._send_empty(200, extra_headers={"Allow": "POST, DELETE, OPTIONS"})
+            return
+        self._send_empty(404)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlsplit(self.path)
@@ -1598,6 +2061,7 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
                     "tools_count": len(TOOLS),
                     "flash_shunt_engaged": True,
                     "require_auth": bool(self.server.require_auth),  # type: ignore[attr-defined]
+                    "oauth_login_mode": "google_signin" if _google_signin_configured() else "bearer_consent",
                     "transports": ["stdio", "http"],
                     "protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
                 },
@@ -1650,7 +2114,7 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
                     "response_types_supported": ["code"],
                     "grant_types_supported": ["authorization_code", "refresh_token"],
                     "code_challenge_methods_supported": ["S256"],
-                    "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+                    "token_endpoint_auth_methods_supported": ["none", "client_secret_post", "client_secret_basic"],
                     "scopes_supported": ["mcp:read", "mcp:tools"],
                 },
             )
@@ -1659,6 +2123,11 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
         if route == "/oauth/authorize":
             params = self._parse_params(parsed.query, b"")
             self._handle_oauth_authorize(params)
+            return
+
+        if route == "/oauth/google/callback":
+            params = self._parse_params(parsed.query, b"")
+            self._handle_google_oauth_callback(params)
             return
 
         if route in ("/mcp", "/mcp/"):
@@ -1697,10 +2166,10 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
         if route == "/oauth/register":
             params = self._parse_params(parsed.query, body)
             srv: ThreadedHTTPServer = self.server  # type: ignore[assignment]
-            if not _is_oauth_admin_authorized(self.headers, params, srv.require_auth):
-                self._send_403_oauth()
+            client, reg_err = srv.oauth_broker.register_client(params)
+            if reg_err is not None or client is None:
+                self._send_json(400, {"error": "invalid_client_metadata", "error_description": reg_err or "Invalid metadata"})
                 return
-            client = srv.oauth_broker.register_client(params)
             self._send_json(201, client)
             return
 
@@ -1729,21 +2198,60 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_oauth_authorize(self, params: dict[str, Any]) -> None:
         srv: ThreadedHTTPServer = self.server  # type: ignore[assignment]
+        redirect_uri = str(params.get("redirect_uri") or "").strip()
+        client_id = str(params.get("client_id") or "alpha-public-client").strip()
+        state = str(params.get("state") or "").strip()
+
+        if redirect_uri:
+            if not _is_valid_redirect_uri(redirect_uri):
+                self._send_json(400, {"error": "invalid_request", "error_description": "Invalid redirect_uri"})
+                return
+            client_rec = srv.oauth_broker.get_client(client_id)
+            if client_rec and client_rec.get("redirect_uris") and redirect_uri not in client_rec["redirect_uris"]:
+                self._send_json(400, {"error": "invalid_request", "error_description": "Unregistered redirect_uri"})
+                return
+
+        if str(params.get("decision") or "").strip().lower() == "deny" and redirect_uri:
+            sep = "&" if "?" in redirect_uri else "?"
+            q = urllib.parse.urlencode({k: v for k, v in (("error", "access_denied"), ("state", state)) if v})
+            self._send_empty(302, extra_headers={"Location": f"{redirect_uri}{sep}{q}", "Cache-Control": "no-store"})
+            return
+
+        wants_html = "text/html" in (self.headers.get("Accept") or "").lower()
+        is_consent_post = self.command == "POST" and str(params.get("consent_ui") or "") == "1"
+
         if not _is_oauth_admin_authorized(self.headers, params, srv.require_auth):
+            if redirect_uri and self.command == "GET" and wants_html:
+                if _google_signin_configured() and str(params.get("mode") or "").lower() != "token":
+                    self._start_google_oauth_signin(params, srv)
+                    return
+                self._send_html(200, self._render_oauth_consent_html(params))
+                return
+            if redirect_uri and is_consent_post:
+                self._send_html(
+                    403,
+                    self._render_oauth_consent_html(
+                        params,
+                        error_msg="Invalid token. Enter your Alpha MCP Bearer Token or OAuth Secret and try again.",
+                    ),
+                )
+                return
             self._send_403_oauth()
             return
+
         resp_type = str(params.get("response_type") or "code").strip()
         if resp_type != "code":
             self._send_json(400, {"error": "unsupported_response_type", "error_description": "Only response_type=code is supported"})
             return
-        client_id = str(params.get("client_id") or "alpha-public-client").strip()
-        redirect_uri = str(params.get("redirect_uri") or "").strip()
-        state = str(params.get("state") or "").strip()
         scope = str(params.get("scope") or "mcp:read mcp:tools").strip()
         resource = str(params.get("resource") or f"{self._base_url()}/mcp").strip()
         challenge = str(params.get("code_challenge") or "").strip()
         method = str(params.get("code_challenge_method") or "").strip()
 
+        client_rec = srv.oauth_broker.get_client(client_id)
+        allow_no_pkce = bool(
+            client_rec and client_rec.get("token_endpoint_auth_method") in ("client_secret_post", "client_secret_basic")
+        )
         code, err = srv.oauth_broker.issue_auth_code(
             client_id=client_id,
             redirect_uri=redirect_uri,
@@ -1751,6 +2259,7 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
             code_challenge_method=method,
             scope=scope,
             resource=resource,
+            allow_no_pkce=allow_no_pkce,
         )
         if err is not None or code is None:
             self._send_json(400, {"error": "invalid_request", "error_description": err or "PKCE S256 required"})
@@ -1760,7 +2269,7 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
         want_json = (
             not redirect_uri
             or str(params.get("response_mode") or "").lower() == "json"
-            or "application/json" in accept
+            or ("application/json" in accept and not wants_html and not is_consent_post)
         )
         payload = {
             "code": code,
@@ -1777,15 +2286,162 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
         q = urllib.parse.urlencode({k: v for k, v in (("code", code), ("state", state)) if v})
         self._send_json(302, payload, extra_headers={"Location": f"{redirect_uri}{sep}{q}"})
 
+    def _start_google_oauth_signin(self, params: dict[str, Any], srv: ThreadedHTTPServer) -> None:
+        resp_type = str(params.get("response_type") or "code").strip()
+        if resp_type != "code":
+            self._send_json(400, {"error": "unsupported_response_type", "error_description": "Only response_type=code is supported"})
+            return
+        client_id = str(params.get("client_id") or "alpha-public-client").strip()
+        redirect_uri = str(params.get("redirect_uri") or "").strip()
+        state = str(params.get("state") or "").strip()
+        scope = str(params.get("scope") or "mcp:read mcp:tools").strip()
+        base = self._base_url()
+        resource = str(params.get("resource") or f"{base}/mcp").strip()
+        challenge = str(params.get("code_challenge") or "").strip()
+        method = str(params.get("code_challenge_method") or "").strip()
+
+        client_rec = srv.oauth_broker.get_client(client_id)
+        auth_method = str(client_rec.get("token_endpoint_auth_method") or "none") if client_rec else "none"
+        allow_no_pkce = auth_method in ("client_secret_post", "client_secret_basic")
+        if challenge or not allow_no_pkce:
+            if method != "S256" or not challenge or len(challenge) < 32:
+                self._send_json(400, {"error": "invalid_request", "error_description": "Valid PKCE S256 code_challenge is required"})
+                return
+
+        g_cid, _g_csec, _allowed = _get_google_oauth_config()
+        csrf_nonce = secrets.token_urlsafe(24)
+        gstate = _sign_stateless_token(
+            "amcp_gs",
+            {
+                "cid": client_id,
+                "ruri": redirect_uri,
+                "st": state,
+                "scp": scope,
+                "res": resource,
+                "cc": challenge,
+                "ccm": method,
+                "am": auth_method,
+                "nonce": csrf_nonce,
+                "exp": int(time.time()) + 600,
+            },
+        )
+        google_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(
+            {
+                "client_id": g_cid,
+                "redirect_uri": f"{base}/oauth/google/callback",
+                "response_type": "code",
+                "scope": "openid email",
+                "state": gstate,
+                "prompt": "select_account",
+            }
+        )
+        secure_attr = "; Secure" if base.startswith("https://") else ""
+        cookie = f"alpha_oauth_csrf={csrf_nonce}; HttpOnly; SameSite=Lax; Path=/oauth/google/callback; Max-Age=600{secure_attr}"
+        self._send_empty(302, extra_headers={"Location": google_url, "Set-Cookie": cookie, "Cache-Control": "no-store"})
+
+    def _handle_google_oauth_callback(self, params: dict[str, Any]) -> None:
+        srv: ThreadedHTTPServer = self.server  # type: ignore[assignment]
+        base = self._base_url()
+        secure_attr = "; Secure" if base.startswith("https://") else ""
+        clear_cookie = f"alpha_oauth_csrf=; HttpOnly; SameSite=Lax; Path=/oauth/google/callback; Max-Age=0{secure_attr}"
+
+        gstate = str(params.get("state") or "").strip()
+        rec = _verify_stateless_token("amcp_gs", gstate)
+        if rec is None or rec.get("typ", "gs") != "gs" and "ruri" not in rec or time.time() > float(rec.get("exp") or 0):
+            self._send_html(
+                400,
+                self._render_oauth_message_html("Session Expired", "Authorization session expired. Return to Gemini and click Connect again."),
+                extra_headers={"Set-Cookie": clear_cookie},
+            )
+            return
+
+        ruri = str(rec.get("ruri") or "").strip()
+        if not _is_valid_redirect_uri(ruri):
+            self._send_html(
+                400,
+                self._render_oauth_message_html("Invalid Redirect", "Invalid redirect URI in authorization state."),
+                extra_headers={"Set-Cookie": clear_cookie},
+            )
+            return
+
+        orig_state = str(rec.get("st") or "").strip()
+        if params.get("error"):
+            sep = "&" if "?" in ruri else "?"
+            q = urllib.parse.urlencode({k: v for k, v in (("error", "access_denied"), ("state", orig_state)) if v})
+            self._send_empty(302, extra_headers={"Location": f"{ruri}{sep}{q}", "Set-Cookie": clear_cookie, "Cache-Control": "no-store"})
+            return
+
+        expected_nonce = str(rec.get("nonce") or "").strip()
+        cookie_nonce = _read_cookie(self.headers, "alpha_oauth_csrf")
+        if not expected_nonce or not cookie_nonce or not hmac.compare_digest(cookie_nonce, expected_nonce):
+            self._send_html(
+                403,
+                self._render_oauth_message_html("Verification Failed", "CSRF verification failed. Close this tab and restart Connect from Gemini."),
+                extra_headers={"Set-Cookie": clear_cookie},
+            )
+            return
+
+        g_code = str(params.get("code") or "").strip()
+        g_cid, g_csec, allowed_emails = _get_google_oauth_config()
+        if not g_code or not (g_cid and g_csec and allowed_emails):
+            self._send_html(
+                400,
+                self._render_oauth_message_html("Sign-In Incomplete", "Missing Google authorization code or OAuth configuration."),
+                extra_headers={"Set-Cookie": clear_cookie},
+            )
+            return
+
+        userinfo, err = _exchange_google_code_for_userinfo(g_code, f"{base}/oauth/google/callback", g_cid, g_csec)
+        if err is not None or userinfo is None:
+            self._send_html(
+                502,
+                self._render_oauth_message_html("Google Sign-In Error", "Google sign-in verification failed."),
+                extra_headers={"Set-Cookie": clear_cookie},
+            )
+            return
+
+        email = str(userinfo.get("email") or "").strip().lower()
+        if userinfo.get("email_verified") is not True or not email or email not in allowed_emails:
+            self._send_html(
+                403,
+                self._render_oauth_message_html("Access Denied", "Access denied for this Google account."),
+                extra_headers={"Set-Cookie": clear_cookie},
+            )
+            return
+
+        allow_no_pkce = str(rec.get("am") or "none") in ("client_secret_post", "client_secret_basic")
+        mcp_code, code_err = srv.oauth_broker.issue_auth_code(
+            client_id=str(rec.get("cid") or "alpha-public-client"),
+            redirect_uri=ruri,
+            code_challenge=str(rec.get("cc") or ""),
+            code_challenge_method=str(rec.get("ccm") or ""),
+            scope=str(rec.get("scp") or "mcp:read mcp:tools"),
+            resource=str(rec.get("res") or f"{base}/mcp"),
+            allow_no_pkce=allow_no_pkce,
+        )
+        if code_err is not None or mcp_code is None:
+            self._send_html(
+                400,
+                self._render_oauth_message_html("OAuth Error", code_err or "Failed to issue authorization code."),
+                extra_headers={"Set-Cookie": clear_cookie},
+            )
+            return
+
+        sep = "&" if "?" in ruri else "?"
+        q = urllib.parse.urlencode({k: v for k, v in (("code", mcp_code), ("state", orig_state)) if v})
+        self._send_empty(302, extra_headers={"Location": f"{ruri}{sep}{q}", "Set-Cookie": clear_cookie, "Cache-Control": "no-store"})
+
     def _handle_oauth_token(self, params: dict[str, Any]) -> None:
         srv: ThreadedHTTPServer = self.server  # type: ignore[assignment]
+        basic_cid, basic_secret = _extract_basic_client_credentials(self.headers)
+        client_id = str(params.get("client_id") or basic_cid or "").strip()
+        client_secret = str(params.get("client_secret") or basic_secret or "").strip()
         grant_type = str(params.get("grant_type") or "").strip()
         if grant_type == "authorization_code":
             code = str(params.get("code") or "").strip()
             verifier = str(params.get("code_verifier") or "").strip()
-            client_id = str(params.get("client_id") or "").strip()
             redirect_uri = str(params.get("redirect_uri") or "").strip()
-            if not code or not verifier:
+            if not code or (not verifier and not client_secret):
                 self._send_json(400, {"error": "invalid_request", "error_description": "code and code_verifier are required"})
                 return
             token_resp, err = srv.oauth_broker.exchange_code(
@@ -1793,6 +2449,7 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
                 code_verifier=verifier,
                 client_id=client_id,
                 redirect_uri=redirect_uri,
+                client_secret=client_secret,
             )
             if err is not None or token_resp is None:
                 self._send_json(400, {"error": "invalid_grant", "error_description": err or "Invalid grant"})
@@ -1805,7 +2462,11 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
             if not rtok:
                 self._send_json(400, {"error": "invalid_request", "error_description": "refresh_token is required"})
                 return
-            token_resp, err = srv.oauth_broker.rotate_refresh_token(rtok)
+            token_resp, err = srv.oauth_broker.rotate_refresh_token(
+                rtok,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
             if err is not None or token_resp is None:
                 self._send_json(400, {"error": "invalid_grant", "error_description": err or "Invalid refresh token"})
                 return
@@ -2013,7 +2674,11 @@ def selftest() -> int:
     assert len(status_obj["sep2640_skills"]) == 3 and status_obj["redaction_patterns_count"] == 13
     assert len(EQUATIONS_VAULT) == 19
     res_list = handle({"jsonrpc": "2.0", "id": 2, "method": "resources/list"})
-    assert res_list is not None and len(res_list["result"]["resources"]) == 4
+    assert res_list is not None and len(res_list["result"]["resources"]) == 5
+    app_res = handle({"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": APP_RESOURCE_URI}})
+    assert app_res is not None and "result" in app_res, app_res
+    app_item = app_res["result"]["contents"][0]
+    assert app_item["mimeType"] == APP_MIME_TYPE and "<!DOCTYPE html>" in app_item["text"]
     prompt_resp = handle({"jsonrpc": "2.0", "id": 3, "method": "prompts/get", "params": {"name": "kppc_lod_blueprint"}})
     assert prompt_resp is not None and "result" in prompt_resp and prompt_resp["result"]["messages"]
 

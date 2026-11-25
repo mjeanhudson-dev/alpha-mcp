@@ -1,0 +1,13 @@
+# Minimal Cloud Build context for Cloud Run: include ONLY runtime files needed by Dockerfile
+*
+!Dockerfile
+!alpha_mcp_server.py
+!mcp_carbon_ingest.py
+!examples/
+!examples/sample_workspace/
+!examples/sample_workspace/*
+!examples/sample_workspace/**
+examples/sample_workspace/__pycache__/
+examples/sample_workspace/**/__pycache__/
+*.pyc
+*.pyo

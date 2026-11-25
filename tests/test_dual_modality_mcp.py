@@ -31,6 +31,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVER_SCRIPT = REPO_ROOT / "alpha_mcp_server.py"
@@ -186,8 +187,22 @@ class TestStdioModalityE2E(unittest.TestCase):
                 "alpha://vault/manifest-summary",
                 "alpha://hosting/zero-cost-blueprint",
                 "alpha://telemetry/exodia-ledger",
+                "ui://alpha-mcp/workbench.html",
             ],
         )
+        app_rr = self._rpc("resources/read", {"uri": "ui://alpha-mcp/workbench.html"})
+        app_item = app_rr["result"]["contents"][0]
+        self.assertEqual(app_item["mimeType"], "text/html;profile=mcp-app")
+        self.assertIn("<!DOCTYPE html>", app_item["text"])
+        self.assertLess(len(app_item["text"].encode("utf-8")), 10 * 1024 * 1024)
+        status_meta = next(t for t in tools if t["name"] == "sovereign_dual_modality_status")["_meta"]
+        self.assertEqual(status_meta["ui"]["resourceUri"], "ui://alpha-mcp/workbench.html")
+        self.assertEqual(
+            [e["type"] for e in status_meta["com.google.antigravity/ui"]["entrypoints"]],
+            ["aux_pane", "global"],
+        )
+        struct_resp = self._rpc("tools/call", {"name": "sovereign_dual_modality_status", "arguments": {}})["result"]
+        self.assertEqual(struct_resp["structuredContent"], json.loads(struct_resp["content"][0]["text"]))
         for uri in ("alpha://genesis/anchor-t0", "alpha://hosting/zero-cost-blueprint", "alpha://telemetry/exodia-ledger"):
             rr = self._rpc("resources/read", {"uri": uri})
             self.assertIn("result", rr)
@@ -453,20 +468,30 @@ class TestStreamableHTTPAndOAuthE2E(unittest.TestCase):
         self.assertEqual(st, 403)
         self.assertEqual(json.loads(body)["error"], "access_denied")
 
-        # Unauthenticated /oauth/register -> 403
-        st, _, _ = _http_call(
+        # Invalid /oauth/register metadata (missing or unsafe redirect_uris) -> 400
+        st, _, body = _http_call(
             f"{self.base}/oauth/register",
             method="POST",
             headers={"Content-Type": "application/json"},
             body=json.dumps({"client_name": "rogue"}).encode("utf-8"),
         )
-        self.assertEqual(st, 403)
+        self.assertEqual(st, 400)
+        self.assertEqual(json.loads(body)["error"], "invalid_client_metadata")
 
-        # Authenticated /oauth/register -> 201
         st, _, body = _http_call(
             f"{self.base}/oauth/register",
             method="POST",
-            headers={"Content-Type": "application/json", "X-Alpha-OAuth-Secret": self.oauth_secret},
+            headers={"Content-Type": "application/json"},
+            body=json.dumps({"client_name": "rogue-js", "redirect_uris": ["javascript:alert(1)"]}).encode("utf-8"),
+        )
+        self.assertEqual(st, 400)
+        self.assertEqual(json.loads(body)["error"], "invalid_client_metadata")
+
+        # Valid RFC 7591 /oauth/register -> 201
+        st, _, body = _http_call(
+            f"{self.base}/oauth/register",
+            method="POST",
+            headers={"Content-Type": "application/json"},
             body=json.dumps({"client_name": "e2e-suite", "redirect_uris": ["http://localhost/cb"]}).encode("utf-8"),
         )
         self.assertEqual(st, 201)
@@ -579,6 +604,268 @@ class TestStreamableHTTPAndOAuthE2E(unittest.TestCase):
             body=self._status_rpc_body(),
         )
         self.assertEqual(st, 401)
+
+    def test_gemini_openauth_dcr_consent_and_cold_start_tokens(self) -> None:
+        # 1. HEAD /mcp -> 401 with WWW-Authenticate and HEAD /health -> 200 (never 501)
+        st, hdrs, _ = _http_call(f"{self.base}/mcp", method="HEAD")
+        self.assertEqual(st, 401)
+        self.assertIn("/.well-known/oauth-protected-resource", hdrs.get("WWW-Authenticate", ""))
+        st, _, _ = _http_call(f"{self.base}/health", method="HEAD")
+        self.assertEqual(st, 200)
+
+        # 2. RFC 7591 unauthenticated DCR with client_secret_basic -> 201
+        redirect_uri = "https://gemini.google.com/oauth/callback"
+        st, _, body = _http_call(
+            f"{self.base}/oauth/register",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            body=json.dumps(
+                {
+                    "client_name": "Gemini OpenAuth",
+                    "redirect_uris": [redirect_uri],
+                    "token_endpoint_auth_method": "client_secret_basic",
+                }
+            ).encode("utf-8"),
+        )
+        self.assertEqual(st, 201)
+        reg = json.loads(body)
+        cid = reg["client_id"]
+        csec = reg["client_secret"]
+        self.assertTrue(cid.startswith("alpha-client-"))
+        self.assertTrue(csec.startswith("amcp_cs_"))
+
+        # 3. Browser GET /oauth/authorize with 2,500-char state -> 200 HTML consent page
+        verifier = "openauth-pkce-verifier-" + secrets.token_hex(24)
+        challenge = _pkce_s256(verifier)
+        long_state = "s" * 2500
+        auth_qs = urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": cid,
+                "redirect_uri": redirect_uri,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "scope": "mcp:read mcp:tools",
+                "state": long_state,
+            }
+        )
+        st, hdrs, body = _http_call(
+            f"{self.base}/oauth/authorize?{auth_qs}",
+            headers={"Accept": "text/html"},
+        )
+        self.assertEqual(st, 200)
+        self.assertIn("text/html", hdrs.get("Content-Type", ""))
+        csp = hdrs.get("Content-Security-Policy", "")
+        self.assertIn("default-src 'none'", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertNotIn("form-action", csp)
+        self.assertIn("Authorize Alpha MCP Access", body)
+
+        base_form = {
+            "consent_ui": "1",
+            "response_type": "code",
+            "client_id": cid,
+            "redirect_uri": redirect_uri,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": "mcp:read mcp:tools",
+            "state": long_state,
+        }
+
+        # 4. Browser POST /oauth/authorize with wrong secret -> 403 HTML
+        st, hdrs, body = _http_call(
+            f"{self.base}/oauth/authorize",
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/html"},
+            body=urllib.parse.urlencode({**base_form, "oauth_secret": "wrong-secret", "decision": "approve"}).encode("utf-8"),
+        )
+        self.assertEqual(st, 403)
+        self.assertIn("text/html", hdrs.get("Content-Type", ""))
+
+        # 5. Browser POST /oauth/authorize decision=deny -> 302 with error=access_denied and exact state
+        st, hdrs, _ = _http_call(
+            f"{self.base}/oauth/authorize",
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/html"},
+            body=urllib.parse.urlencode({**base_form, "decision": "deny"}).encode("utf-8"),
+            follow_redirects=False,
+        )
+        self.assertEqual(st, 302)
+        deny_qs = urllib.parse.parse_qs(urllib.parse.urlsplit(hdrs["Location"]).query)
+        self.assertEqual(deny_qs["error"][0], "access_denied")
+        self.assertEqual(deny_qs["state"][0], long_state)
+
+        # 6. Browser POST /oauth/authorize with bearer_token -> 302 with code and exact 2,500-char state
+        st, hdrs, _ = _http_call(
+            f"{self.base}/oauth/authorize",
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/html"},
+            body=urllib.parse.urlencode({**base_form, "oauth_secret": self.bearer_token, "decision": "approve"}).encode("utf-8"),
+            follow_redirects=False,
+        )
+        self.assertEqual(st, 302)
+        ok_qs = urllib.parse.parse_qs(urllib.parse.urlsplit(hdrs["Location"]).query)
+        self.assertEqual(ok_qs["state"][0], long_state)
+        code = ok_qs["code"][0]
+        self.assertTrue(code.startswith("amcp_ac."))
+
+        # 7. POST /oauth/token with Authorization: Basic + PKCE code_verifier -> 200 amcp_at. + amcp_rt.
+        basic_raw = f"{urllib.parse.quote_plus(cid)}:{urllib.parse.quote_plus(csec)}".encode("utf-8")
+        basic_hdr = "Basic " + base64.b64encode(basic_raw).decode("ascii")
+        st, _, body = _http_call(
+            f"{self.base}/oauth/token",
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": basic_hdr},
+            body=urllib.parse.urlencode(
+                {
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "code_verifier": verifier,
+                    "redirect_uri": redirect_uri,
+                }
+            ).encode("utf-8"),
+        )
+        self.assertEqual(st, 200)
+        tok = json.loads(body)
+        access_token = tok["access_token"]
+        refresh_token = tok["refresh_token"]
+        self.assertTrue(access_token.startswith("amcp_at."))
+        self.assertTrue(refresh_token.startswith("amcp_rt."))
+
+        # 8. Cold-start verification: fresh OAuthPKCEBroker instance validates & rotates stateless tokens
+        fresh_broker = srv_mod.OAuthPKCEBroker()
+        self.assertTrue(fresh_broker.validate_access_token(access_token))
+        rotated, rot_err = fresh_broker.rotate_refresh_token(refresh_token, client_id=cid, client_secret=csec)
+        self.assertIsNone(rot_err)
+        self.assertIsNotNone(rotated)
+        assert rotated is not None
+        self.assertTrue(fresh_broker.validate_access_token(rotated["access_token"]))
+
+    def test_google_signin_oauth_bridge_allowlist_and_csrf(self) -> None:
+        old_env = {k: os.environ.get(k) for k in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "ALPHA_MCP_ALLOWED_EMAILS")}
+        os.environ["GOOGLE_OAUTH_CLIENT_ID"] = "test-google-client.apps.googleusercontent.com"
+        os.environ["GOOGLE_OAUTH_CLIENT_SECRET"] = "test-google-client-secret"
+        os.environ["ALPHA_MCP_ALLOWED_EMAILS"] = "eloquent@eloquentwin.com"
+        try:
+            # 1. /health reports oauth_login_mode=google_signin
+            st, _, body = _http_call(f"{self.base}/health")
+            self.assertEqual(st, 200)
+            self.assertEqual(json.loads(body)["oauth_login_mode"], "google_signin")
+
+            # 2. Register DCR client
+            redirect_uri = "https://oauth-redirect.googleusercontent.com/r/gemini-test"
+            st, _, body = _http_call(
+                f"{self.base}/oauth/register",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                body=json.dumps({"client_name": "Gemini", "redirect_uris": [redirect_uri]}).encode("utf-8"),
+            )
+            self.assertEqual(st, 201)
+            cid = json.loads(body)["client_id"]
+
+            # 3. GET /oauth/authorize -> 302 to accounts.google.com + Set-Cookie alpha_oauth_csrf
+            verifier = "google-bridge-pkce-" + secrets.token_hex(24)
+            challenge = _pkce_s256(verifier)
+            auth_qs = urllib.parse.urlencode(
+                {
+                    "response_type": "code",
+                    "client_id": cid,
+                    "redirect_uri": redirect_uri,
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                    "scope": "mcp:read mcp:tools",
+                    "state": "gemini-state-999",
+                }
+            )
+            st, hdrs, _ = _http_call(
+                f"{self.base}/oauth/authorize?{auth_qs}",
+                headers={"Accept": "text/html"},
+                follow_redirects=False,
+            )
+            self.assertEqual(st, 302)
+            loc = hdrs["Location"]
+            self.assertTrue(loc.startswith("https://accounts.google.com/o/oauth2/v2/auth"))
+            g_qs = urllib.parse.parse_qs(urllib.parse.urlsplit(loc).query)
+            gstate = g_qs["state"][0]
+            self.assertTrue(gstate.startswith("amcp_gs."))
+            cookie_hdr = hdrs.get("Set-Cookie", "")
+            self.assertIn("alpha_oauth_csrf=", cookie_hdr)
+            csrf_pair = cookie_hdr.split(";", 1)[0]
+
+            # 4. Callback without CSRF cookie -> 403
+            st, _, _ = _http_call(
+                f"{self.base}/oauth/google/callback?" + urllib.parse.urlencode({"state": gstate, "code": "gcode-1"}),
+                follow_redirects=False,
+            )
+            self.assertEqual(st, 403)
+
+            # 5. Callback with non-allowlisted email -> 403
+            with mock.patch.object(
+                srv_mod,
+                "_exchange_google_code_for_userinfo",
+                return_value=({"email": "stranger@example.com", "email_verified": True}, None),
+            ):
+                st, _, _ = _http_call(
+                    f"{self.base}/oauth/google/callback?" + urllib.parse.urlencode({"state": gstate, "code": "gcode-2"}),
+                    headers={"Cookie": csrf_pair},
+                    follow_redirects=False,
+                )
+                self.assertEqual(st, 403)
+
+            # 6. Callback with unverified allowlisted email -> 403
+            with mock.patch.object(
+                srv_mod,
+                "_exchange_google_code_for_userinfo",
+                return_value=({"email": "eloquent@eloquentwin.com", "email_verified": False}, None),
+            ):
+                st, _, _ = _http_call(
+                    f"{self.base}/oauth/google/callback?" + urllib.parse.urlencode({"state": gstate, "code": "gcode-3"}),
+                    headers={"Cookie": csrf_pair},
+                    follow_redirects=False,
+                )
+                self.assertEqual(st, 403)
+
+            # 7. Callback with allowlisted verified email -> 302 to Gemini redirect_uri + PKCE token exchange
+            with mock.patch.object(
+                srv_mod,
+                "_exchange_google_code_for_userinfo",
+                return_value=({"email": "eloquent@eloquentwin.com", "email_verified": True}, None),
+            ):
+                st, hdrs, _ = _http_call(
+                    f"{self.base}/oauth/google/callback?" + urllib.parse.urlencode({"state": gstate, "code": "gcode-4"}),
+                    headers={"Cookie": csrf_pair},
+                    follow_redirects=False,
+                )
+                self.assertEqual(st, 302)
+                cb_qs = urllib.parse.parse_qs(urllib.parse.urlsplit(hdrs["Location"]).query)
+                self.assertEqual(cb_qs["state"][0], "gemini-state-999")
+                mcp_code = cb_qs["code"][0]
+                self.assertTrue(mcp_code.startswith("amcp_ac."))
+
+            st, _, body = _http_call(
+                f"{self.base}/oauth/token",
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                body=urllib.parse.urlencode(
+                    {
+                        "grant_type": "authorization_code",
+                        "code": mcp_code,
+                        "code_verifier": verifier,
+                        "client_id": cid,
+                        "redirect_uri": redirect_uri,
+                    }
+                ).encode("utf-8"),
+            )
+            self.assertEqual(st, 200)
+            tok = json.loads(body)
+            self.assertTrue(tok["access_token"].startswith("amcp_at."))
+            self.assertTrue(tok["refresh_token"].startswith("amcp_rt."))
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_non_loopback_forwarded_header_fail_closed(self) -> None:
         port = _free_port()
