@@ -1,7 +1,7 @@
 # Unified Inference Layer Architecture Specification (`alpha-mcp` + Sovereign Nexus `v5.0.0-nexus`)
 
 - **Author & Maintainer:** `Eloquent` (`@mjeanhudson-dev`)
-- **Specification Version:** `1.1.0` (end-user-agnostic public release; aligned to Sovereign Nexus MCP `v5.0.0-nexus` + Stage 0 Argon-Carbon Vault)
+- **Specification Version:** `2.0.0` (end-user-agnostic public release; aligned to `alpha-mcp v2.0` (`10` tools, Dual-Modality + SEP-1865 Workbench), Coalesced Sovereign Kernel `v6.0.0-coalesced` (`12` local stdio tools), + Stage 0 Argon-Carbon Vault)
 - **Genesis Coordinate:** `t = 0` (August 2025 Foundational Archive — USPTO Provisional Patent Application No. `63/911,661`)
 - **Stability Invariant:** $\text{Stability} = \int (\text{Anchor} \cdot \text{Presence})\,dt \to \infty$
 - **Target Artifact:** `~/alpha-mcp/INFERENCE_LAYER_SPEC.md`

@@ -7,6 +7,9 @@
 !examples/sample_workspace/
 !examples/sample_workspace/*
 !examples/sample_workspace/**
+!app/
+!app/dist/
+!app/dist/workbench.html
 examples/sample_workspace/__pycache__/
 examples/sample_workspace/**/__pycache__/
 *.pyc

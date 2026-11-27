@@ -13,6 +13,7 @@ RUN groupadd --gid 10001 alpha \
 
 COPY --chown=10001:10001 alpha_mcp_server.py mcp_carbon_ingest.py ./
 COPY --chown=10001:10001 examples/sample_workspace ./examples/sample_workspace
+COPY --chown=10001:10001 app/dist/workbench.html ./app/dist/workbench.html
 
 USER 10001:10001
 

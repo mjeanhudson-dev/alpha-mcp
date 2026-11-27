@@ -123,12 +123,27 @@ if ($SetGoogleOAuth) {
 }
 
 # 3. Assemble Cloud Run secrets & env args and deploy
+if (-not (Test-GcpSecretExists -SecretName "alpha-mcp-signing-secret")) {
+    Write-Host "[2b/4] Minting persistent alpha-mcp-signing-secret in Secret Manager..." -ForegroundColor Cyan
+    $newSig = (python -c "import secrets; print(secrets.token_urlsafe(32))").Trim()
+    Set-GcpSecretValue -SecretName "alpha-mcp-signing-secret" -Value $newSig
+    $newSig = $null
+}
+
 $hasGoogleClientId = Test-GcpSecretExists -SecretName "alpha-mcp-google-client-id"
 $hasGoogleClientSecret = Test-GcpSecretExists -SecretName "alpha-mcp-google-client-secret"
 $hasAllowedEmailsSecret = Test-GcpSecretExists -SecretName "alpha-mcp-allowed-emails"
 $googleReady = ($hasGoogleClientId -and $hasGoogleClientSecret -and ($hasAllowedEmailsSecret -or -not [string]::IsNullOrWhiteSpace($AllowedEmails)))
 
-$secretsArg = "ALPHA_MCP_BEARER_TOKEN=alpha-mcp-bearer-token:latest"
+$secretsArg = "ALPHA_MCP_BEARER_TOKEN=alpha-mcp-bearer-token:latest,ALPHA_MCP_SIGNING_SECRET=alpha-mcp-signing-secret:latest"
+$envVarsList = @(
+    "GOOGLE_CLOUD_PROJECT=$Project",
+    "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT=$ServiceAccount",
+    "NEXUS_FLASH_SHUNT=1",
+    "NEXUS_VERTEX_MODEL=gemini-4-carbon",
+    "ALPHA_MCP_GCS_VAULT_URI=gs://alpha-mcp-vault-907374614316/stage0/latest",
+    "ALPHA_MCP_OAUTH_DEFAULT_MODE=hybrid"
+)
 $deployArgs = @(
     "run", "deploy", $Service,
     "--source", $repoRoot,
@@ -136,9 +151,10 @@ $deployArgs = @(
     "--project", $Project,
     "--service-account", $ServiceAccount,
     "--min-instances", "0",
-    "--max-instances", "1",
+    "--max-instances", "2",
     "--memory", "512Mi",
     "--cpu", "1",
+    "--cpu-throttling",
     "--cpu-boost",
     "--allow-unauthenticated",
     "--quiet"
@@ -147,11 +163,12 @@ $deployArgs = @(
 if ($googleReady) {
     $secretsArg += ",GOOGLE_OAUTH_CLIENT_ID=alpha-mcp-google-client-id:latest,GOOGLE_OAUTH_CLIENT_SECRET=alpha-mcp-google-client-secret:latest"
     if (-not [string]::IsNullOrWhiteSpace($AllowedEmails)) {
-        $deployArgs += @("--set-env-vars", "ALPHA_MCP_ALLOWED_EMAILS=$AllowedEmails")
+        $envVarsList += "ALPHA_MCP_ALLOWED_EMAILS=$AllowedEmails"
     } elseif ($hasAllowedEmailsSecret) {
         $secretsArg += ",ALPHA_MCP_ALLOWED_EMAILS=alpha-mcp-allowed-emails:latest"
     }
 }
+$deployArgs += @("--set-env-vars", ($envVarsList -join ","))
 $deployArgs += @("--set-secrets", $secretsArg)
 
 Write-Host "[3/4] Deploying $Service to Cloud Run ($Region, google_signin=$googleReady)..." -ForegroundColor Cyan

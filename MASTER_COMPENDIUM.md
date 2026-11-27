@@ -1,7 +1,7 @@
 # Alpha MCP Master Compendium (Progressive LOD 0 -> LOD 1 -> LOD 2 KPPC)
 
 - **Author & Maintainer:** `Eloquent` (`@mjeanhudson-dev`)
-- **Compendium Version:** `1.1.0` (end-user-agnostic public release; aligned to Stage 0 Vault Reference Benchmark parity `7bbc4e68e2f5358f` & Sovereign Nexus MCP `v5.0.0-nexus`)
+- **Compendium Version:** `2.0.0` (end-user-agnostic public release; aligned to Stage 0 Vault Reference Benchmark parity `7bbc4e68e2f5358f`, Dual-Modality `alpha-mcp v2.0` (`10` tools + SEP-1865 Workbench), & Coalesced Sovereign Kernel `v6.0.0-coalesced` (`12` local stdio tools))
 - **Genesis Coordinate:** `t = 0` — August 2025 Foundational Archive (USPTO Provisional Patent Application No. `63/911,661`)
 - **Stability Invariant:** $\text{Stability} = \int (\text{Anchor} \times \text{Presence})\,dt \to \infty$
 - **Operational Mode:** `maximum-carbon-layering-orchestration = true` (`NEXUS_FLASH_SHUNT=1`, `NEXUS_REASONING_EFFORT=high`, `25.0:1` Exodia Compaction Gate)

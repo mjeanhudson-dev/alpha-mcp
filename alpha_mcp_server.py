@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import hashlib
 import hmac
 import html
@@ -32,6 +33,7 @@ import socketserver
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -282,7 +284,158 @@ _TELEMETRY: dict[str, Any] = {
 # Stage 0 Vault & Tool Implementations (#01..#10)
 # ---------------------------------------------------------------------------
 
+_KEYLESS_TOKEN_CACHE: dict[str, Any] = {"token": "", "expires_at": 0.0}
+_KEYLESS_TOKEN_LOCK = threading.Lock()
+_GCS_HYDRATE_LOCK = threading.Lock()
+_GCS_HYDRATED_DB_PATH: Path | None = None
+
+
+def _mint_gcp_runtime_token(sa: str = "") -> tuple[str, str]:
+    """Mint a short-lived GCP Bearer token in RAM via Metadata Server (Cloud Run/GCE) or gcloud SA impersonation."""
+    now = time.time()
+    with _KEYLESS_TOKEN_LOCK:
+        if _KEYLESS_TOKEN_CACHE["token"] and now < float(_KEYLESS_TOKEN_CACHE["expires_at"]):
+            return str(_KEYLESS_TOKEN_CACHE["token"]), "ram_cache"
+    env_tok = os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+    if env_tok:
+        return env_tok, "env_access_token"
+
+    gcloud = shutil.which("gcloud.cmd") or shutil.which("gcloud")
+    if os.environ.get("K_SERVICE") or not gcloud:
+        meta_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+        req = urllib.request.Request(meta_url, headers={"Metadata-Flavor": "Google"}, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            tok = str(data.get("access_token") or "").strip()
+            exp_in = int(data.get("expires_in") or 3300)
+            if len(tok) >= 20:
+                with _KEYLESS_TOKEN_LOCK:
+                    _KEYLESS_TOKEN_CACHE["token"] = tok
+                    _KEYLESS_TOKEN_CACHE["expires_at"] = now + max(60, exp_in - 120)
+                return tok, "gcp_metadata_server"
+        except Exception as exc:
+            if not gcloud:
+                return "", f"metadata_token_failed:{type(exc).__name__}"
+
+    if not gcloud:
+        return "", "gcloud CLI not found"
+    cmd = [gcloud, "auth", "print-access-token"]
+    if sa:
+        cmd.append(f"--impersonate-service-account={sa}")
+    env = os.environ.copy()
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False, env=env)
+    tok = proc.stdout.strip() if proc.returncode == 0 else ""
+    if len(tok) < 20:
+        return "", "token mint failed; check serviceAccountTokenCreator permission"
+    with _KEYLESS_TOKEN_LOCK:
+        _KEYLESS_TOKEN_CACHE["token"] = tok
+        _KEYLESS_TOKEN_CACHE["expires_at"] = now + 3300.0
+    return tok, "gcloud_impersonation"
+
+
+def _hydrate_gcs_vault_if_configured() -> Path | None:
+    """Lazily hydrate a read-only SQLite FTS5 vault in /tmp from scrubbed GCS JSONL(.gz) exports."""
+    global _GCS_HYDRATED_DB_PATH
+    gcs_uri = os.environ.get("ALPHA_MCP_GCS_VAULT_URI", "").strip()
+    if not gcs_uri or not gcs_uri.startswith("gs://") or "--selftest" in sys.argv or os.environ.get("ALPHA_MCP_OFFLINE_SELFTEST") == "1":
+        return None
+    with _GCS_HYDRATE_LOCK:
+        if _GCS_HYDRATED_DB_PATH is not None and _GCS_HYDRATED_DB_PATH.exists():
+            return _GCS_HYDRATED_DB_PATH
+        target = Path(tempfile.gettempdir()) / "alpha_gcs_stage0_vault.sqlite3"
+        if target.exists() and target.stat().st_size > 4096:
+            _GCS_HYDRATED_DB_PATH = target
+            return target
+        rest = gcs_uri[5:].strip("/")
+        bucket, _, prefix = rest.partition("/")
+        if not bucket:
+            return None
+        sa = os.environ.get("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", "").strip()
+        tok, _err = _mint_gcp_runtime_token(sa)
+        if not tok:
+            return None
+
+        def _fetch_jsonl(stem: str) -> list[dict[str, Any]]:
+            for ext, is_gz in ((".jsonl", False), (".jsonl.gz", True)):
+                obj_name = f"{prefix}/{stem}{ext}" if prefix else f"{stem}{ext}"
+                url = f"https://storage.googleapis.com/storage/v1/b/{urllib.parse.quote(bucket, safe='')}/o/{urllib.parse.quote(obj_name, safe='')}?alt=media"
+                req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tok}"}, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        raw = resp.read()
+                    text = gzip.decompress(raw).decode("utf-8", "replace") if is_gz else raw.decode("utf-8", "replace")
+                    return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+                except urllib.error.HTTPError as he:
+                    if he.code == 404:
+                        continue
+                    return []
+                except Exception:
+                    return []
+            return []
+
+        files_rows = _fetch_jsonl("files")
+        slices_rows = _fetch_jsonl("slices_redacted")
+        if not files_rows and not slices_rows:
+            return None
+        links_rows = _fetch_jsonl("links")
+        vhdx_rows = _fetch_jsonl("vhdx_manifest")
+        zip_rows = _fetch_jsonl("zip_manifest")
+        audit_rows = _fetch_jsonl("secret_audit")
+
+        tmp_db = target.with_suffix(f".{os.getpid()}.tmp")
+        if tmp_db.exists():
+            tmp_db.unlink(missing_ok=True)
+        conn = sqlite3.connect(str(tmp_db))
+        try:
+            conn.executescript("""
+                PRAGMA journal_mode=DELETE;
+                PRAGMA synchronous=OFF;
+                CREATE TABLE files (id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL, path TEXT UNIQUE NOT NULL, folder_root TEXT NOT NULL, ext TEXT NOT NULL, size_bytes INTEGER NOT NULL, ast_summary TEXT, is_duplicate INTEGER DEFAULT 0);
+                CREATE TABLE links (id INTEGER PRIMARY KEY, source_path TEXT NOT NULL, url TEXT NOT NULL, category TEXT NOT NULL, context TEXT);
+                CREATE TABLE secret_audit (id INTEGER PRIMARY KEY, source_path TEXT NOT NULL, secret_type TEXT NOT NULL, line_number INTEGER NOT NULL);
+                CREATE TABLE vhdx_manifest (id INTEGER PRIMARY KEY, vhdx_path TEXT NOT NULL, entry_path TEXT NOT NULL, entry_size INTEGER NOT NULL, mode_note TEXT);
+                CREATE TABLE zip_manifest (id INTEGER PRIMARY KEY, zip_path TEXT NOT NULL, folder_root TEXT NOT NULL, entry_path TEXT NOT NULL, entry_size INTEGER NOT NULL, compressed_size INTEGER NOT NULL);
+            """)
+            fts_ok = True
+            try:
+                conn.execute("CREATE VIRTUAL TABLE slices_fts USING fts5(path, folder_root, chunk_index UNINDEXED, line_range UNINDEXED, ast_summary, content, tokenize='porter unicode61');")
+            except sqlite3.OperationalError:
+                fts_ok = False
+                conn.execute("CREATE TABLE slices_fallback (path TEXT, folder_root TEXT, chunk_index INTEGER, line_range TEXT, ast_summary TEXT, content TEXT);")
+            if files_rows:
+                conn.executemany("INSERT OR IGNORE INTO files (sha256, path, folder_root, ext, size_bytes, ast_summary, is_duplicate) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                 [(str(r.get("sha256", "")), str(r.get("path", "")), str(r.get("folder_root", "")), str(r.get("ext", "")), int(r.get("size_bytes") or 0), str(r.get("ast_summary", "")), int(bool(r.get("is_duplicate")))) for r in files_rows])
+            if slices_rows:
+                tbl = "slices_fts" if fts_ok else "slices_fallback"
+                conn.executemany(f"INSERT INTO {tbl} (path, folder_root, chunk_index, line_range, ast_summary, content) VALUES (?, ?, ?, ?, ?, ?)",
+                                 [(str(r.get("path", "")), str(r.get("folder_root", "")), int(r.get("chunk_index") or 0), str(r.get("line_range", "")), str(r.get("ast_summary", "")), str(r.get("content", ""))) for r in slices_rows])
+            if links_rows:
+                conn.executemany("INSERT INTO links (source_path, url, category, context) VALUES (?, ?, ?, ?)",
+                                 [(str(r.get("source_path", "")), str(r.get("url", "")), str(r.get("category", "")), str(r.get("context", ""))) for r in links_rows])
+            if vhdx_rows:
+                conn.executemany("INSERT INTO vhdx_manifest (vhdx_path, entry_path, entry_size, mode_note) VALUES (?, ?, ?, ?)",
+                                 [(str(r.get("vhdx_path", "")), str(r.get("entry_path", "")), int(r.get("entry_size") or 0), str(r.get("mode_note", ""))) for r in vhdx_rows])
+            if zip_rows:
+                conn.executemany("INSERT INTO zip_manifest (zip_path, folder_root, entry_path, entry_size, compressed_size) VALUES (?, ?, ?, ?, ?)",
+                                 [(str(r.get("zip_path", "")), str(r.get("folder_root", "")), str(r.get("entry_path", "")), int(r.get("entry_size") or 0), int(r.get("compressed_size") or 0)) for r in zip_rows])
+            if audit_rows:
+                conn.executemany("INSERT INTO secret_audit (source_path, secret_type, line_number) VALUES (?, ?, ?)",
+                                 [(str(r.get("source_path", "")), str(r.get("secret_type", "")), int(r.get("line_number") or 0)) for r in audit_rows])
+            conn.commit()
+        finally:
+            conn.close()
+        os.replace(tmp_db, target)
+        _GCS_HYDRATED_DB_PATH = target
+        return target
+
+
 def open_vault(db_path: str | None) -> tuple[sqlite3.Connection | None, str]:
+    if not db_path:
+        hydrated = _hydrate_gcs_vault_if_configured()
+        if hydrated is not None and hydrated.exists():
+            return sqlite3.connect(f"file:{hydrated.as_posix()}?mode=ro", uri=True, timeout=3.0), ""
     explicit = db_path or os.environ.get("ALPHA_MCP_VAULT_DB", "")
     if explicit:
         target = Path(explicit).expanduser().resolve()
@@ -489,10 +642,6 @@ def tool_edge_route(
     }
 
 
-_KEYLESS_TOKEN_CACHE: dict[str, Any] = {"token": "", "expires_at": 0.0}
-_KEYLESS_TOKEN_LOCK = threading.Lock()
-
-
 def tool_vertex_query(prompt: str, model: str = "", max_tokens: int = 512) -> dict[str, Any]:
     req_model = (model or "").strip() or (os.environ.get("NEXUS_VERTEX_MODEL", "").strip() or APEX_PROVIDER_MODELS["google"])
     resolved_model, shunt_applied = enforce_apex_shunt(req_model, provider="google")
@@ -501,47 +650,23 @@ def tool_vertex_query(prompt: str, model: str = "", max_tokens: int = 512) -> di
             _TELEMETRY["apex_shunts_applied"] += 1
     project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
     sa = os.environ.get("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", "").strip()
-    if not project or not sa:
+    if not project or (not sa and not os.environ.get("K_SERVICE")):
         return {
             "status": "NOT_CONFIGURED",
             "requested_model": req_model,
             "resolved_model": resolved_model,
             "shunt_applied": shunt_applied,
-            "hint": "Set GOOGLE_CLOUD_PROJECT and GOOGLE_IMPERSONATE_SERVICE_ACCOUNT (keyless impersonation via gcloud).",
+            "hint": "Set GOOGLE_CLOUD_PROJECT and GOOGLE_IMPERSONATE_SERVICE_ACCOUNT (or run on Cloud Run with attached SA).",
         }
-    now = time.time()
-    tok = ""
-    with _KEYLESS_TOKEN_LOCK:
-        if _KEYLESS_TOKEN_CACHE["token"] and now < float(_KEYLESS_TOKEN_CACHE["expires_at"]):
-            tok = str(_KEYLESS_TOKEN_CACHE["token"])
+    tok, tok_err = _mint_gcp_runtime_token(sa)
     if not tok:
-        gcloud = shutil.which("gcloud.cmd") or shutil.which("gcloud")
-        if not gcloud:
-            return {
-                "status": "ERROR",
-                "requested_model": req_model,
-                "resolved_model": resolved_model,
-                "shunt_applied": shunt_applied,
-                "error": "gcloud CLI not found",
-            }
-        tok = subprocess.run(
-            [gcloud, "auth", "print-access-token", f"--impersonate-service-account={sa}"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        ).stdout.strip()
-        if len(tok) < 20:
-            return {
-                "status": "ERROR",
-                "requested_model": req_model,
-                "resolved_model": resolved_model,
-                "shunt_applied": shunt_applied,
-                "error": "token mint failed; check serviceAccountTokenCreator permission",
-            }
-        with _KEYLESS_TOKEN_LOCK:
-            _KEYLESS_TOKEN_CACHE["token"] = tok
-            _KEYLESS_TOKEN_CACHE["expires_at"] = now + 3300.0
+        return {
+            "status": "ERROR",
+            "requested_model": req_model,
+            "resolved_model": resolved_model,
+            "shunt_applied": shunt_applied,
+            "error": tok_err,
+        }
     url = (
         f"https://aiplatform.googleapis.com/v1/projects/{urllib.parse.quote(project)}/locations/global"
         f"/publishers/google/models/{urllib.parse.quote(resolved_model)}:generateContent"
@@ -1739,6 +1864,13 @@ def _google_signin_configured() -> bool:
     return bool(cid and csec and allowed)
 
 
+def _oauth_default_mode() -> str:
+    explicit = os.environ.get("ALPHA_MCP_OAUTH_DEFAULT_MODE", "").strip().lower()
+    if explicit in ("hybrid", "token", "bearer_consent", "google_signin"):
+        return explicit
+    return "google_signin" if _google_signin_configured() else "bearer_consent"
+
+
 def _read_cookie(headers: Any, name: str) -> str:
     raw = str(headers.get("Cookie") or "").strip()
     if not raw:
@@ -1957,6 +2089,22 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
             if params.get(k) is not None and str(params.get(k)) != ""
         )
         err_block = f'<p class="err" role="alert">{html.escape(error_msg)}</p>' if error_msg else ""
+        google_btn_block = ""
+        if _google_signin_configured():
+            g_qs = urllib.parse.urlencode(
+                {k: str(params.get(k) or "") for k in hidden_keys if params.get(k) is not None and str(params.get(k)) != ""}
+                | {"mode": "google"}
+            )
+            cb_uri = f"{self._base_url()}/oauth/google/callback"
+            google_btn_block = (
+                "<div style='margin-top:18px;padding-top:16px;border-top:1px solid #263042'>"
+                f"<a href='/oauth/authorize?{html.escape(g_qs, quote=True)}' "
+                "style='display:block;text-align:center;padding:11px 14px;border-radius:12px;border:1px solid #33435e;"
+                "background:#182131;color:#e6eefc;text-decoration:none;font-weight:600;font-size:.9rem'>"
+                "Continue with Google Sign-In</a>"
+                f"<p style='margin:8px 0 0;font-size:.76rem;color:#7e90ab;line-height:1.4'>Requires <code>{html.escape(cb_uri)}</code> in GCP OAuth Client Authorized Redirect URIs.</p>"
+                "</div>"
+            )
         return (
             "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1991,7 +2139,7 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
             "<div class='row'>"
             "<button class='ok' type='submit' name='decision' value='approve'>Approve &amp; Connect</button>"
             "<button class='deny' type='submit' name='decision' value='deny' formnovalidate>Deny</button>"
-            "</div></form></main></body></html>"
+            f"</div></form>{google_btn_block}</main></body></html>"
         )
 
     def _render_oauth_message_html(self, title: str, message: str) -> str:
@@ -2061,7 +2209,7 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
                     "tools_count": len(TOOLS),
                     "flash_shunt_engaged": True,
                     "require_auth": bool(self.server.require_auth),  # type: ignore[attr-defined]
-                    "oauth_login_mode": "google_signin" if _google_signin_configured() else "bearer_consent",
+                    "oauth_login_mode": _oauth_default_mode(),
                     "transports": ["stdio", "http"],
                     "protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
                 },
@@ -2222,7 +2370,9 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
 
         if not _is_oauth_admin_authorized(self.headers, params, srv.require_auth):
             if redirect_uri and self.command == "GET" and wants_html:
-                if _google_signin_configured() and str(params.get("mode") or "").lower() != "token":
+                req_mode = str(params.get("mode") or "").strip().lower()
+                eff_mode = req_mode if req_mode in ("google", "token") else _oauth_default_mode()
+                if _google_signin_configured() and eff_mode in ("google", "google_signin"):
                     self._start_google_oauth_signin(params, srv)
                     return
                 self._send_html(200, self._render_oauth_consent_html(params))
