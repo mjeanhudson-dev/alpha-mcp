@@ -80,8 +80,21 @@ class TestStdioModalityE2E(unittest.TestCase):
 
     def setUp(self) -> None:
         env = os.environ.copy()
-        env.pop("GOOGLE_CLOUD_PROJECT", None)
-        env.pop("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", None)
+        for k in (
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
+            "AETHER_VERTEX_MODEL",
+            "NEXUS_VERTEX_MODEL",
+            "AETHER_FLASH_SHUNT",
+            "NEXUS_FLASH_SHUNT",
+            "AETHER_MIN_MODEL",
+            "NEXUS_MIN_MODEL",
+            "AETHER_REASONING_EFFORT",
+            "NEXUS_REASONING_EFFORT",
+            "AETHER_CLOUD_MCP_URL",
+            "ALPHA_MCP_CLOUD_URL",
+        ):
+            env.pop(k, None)
         self.proc = subprocess.Popen(
             [sys.executable, str(SERVER_SCRIPT), "--transport", "stdio"],
             stdin=subprocess.PIPE,
@@ -128,9 +141,10 @@ class TestStdioModalityE2E(unittest.TestCase):
         return json.loads(raw_text), bool(result.get("isError")), raw_text
 
     def test_stdio_full_contract(self) -> None:
-        # 1. Initialize & protocol version negotiation
-        init = self._rpc("initialize", {"protocolVersion": "2026-07-28"})
-        self.assertEqual(init["result"]["protocolVersion"], "2026-07-28")
+        # 1. Initialize & 5-version protocol matrix negotiation
+        for pver in ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"):
+            init = self._rpc("initialize", {"protocolVersion": pver})
+            self.assertEqual(init["result"]["protocolVersion"], pver)
         self.assertEqual(init["result"]["serverInfo"], {"name": "alpha-mcp", "version": "2.0.0"})
         self.assertIs(init["result"]["capabilities"]["tools"]["listChanged"], False)
         self.assertIn("resources", init["result"]["capabilities"])
@@ -246,8 +260,16 @@ class TestStdioModalityE2E(unittest.TestCase):
         self.assertLessEqual(routed_big["estimated_tokens"], 6000)
 
         vtx, _, _ = self._tool_call("vertex_keyless_query", {"prompt": "ping", "model": "gemini-2.5-flash-lite"})
-        self.assertEqual(vtx["resolved_model"], "gemini-4-neon")
+        self.assertEqual(vtx["resolved_model"], "gemini-4-carbon")
         self.assertTrue(vtx["shunt_applied"])
+        vtx_def, _, _ = self._tool_call("vertex_keyless_query", {"prompt": "ping"})
+        self.assertEqual(vtx_def["resolved_model"], "gemini-4-carbon")
+        self.assertFalse(vtx_def["shunt_applied"])
+
+        manifest_res, _, _ = self._tool_call("stage0_vault_manifest_lookup", {"scope": "summary"})
+        self.assertEqual(manifest_res["boot_code_sha256"], srv_mod.BOOT_CODE_SHA256)
+        self.assertEqual(manifest_res["disk_code_sha256"], srv_mod.BOOT_CODE_SHA256)
+        self.assertTrue(manifest_res["runtime_parity_ok"])
 
         # 7. tandem_edge_route multi_turn escalation
         edge_mt, _, _ = self._tool_call("tandem_edge_route", {"phone_temp_c": 34.0, "vram_used_gb": 3.0, "multi_turn": True})
@@ -390,6 +412,9 @@ class TestStreamableHTTPAndOAuthE2E(unittest.TestCase):
         self.assertEqual(health["version"], "2.0.0")
         self.assertEqual(health["tools_count"], 10)
         self.assertTrue(health["flash_shunt_engaged"])
+        self.assertEqual(health["boot_code_sha256"], srv_mod.BOOT_CODE_SHA256)
+        self.assertEqual(health["disk_code_sha256"], srv_mod.BOOT_CODE_SHA256)
+        self.assertTrue(health["runtime_parity_ok"])
 
         st, _, body = _http_call(f"{self.base}/.well-known/agent-card.json")
         self.assertEqual(st, 200)
@@ -962,6 +987,76 @@ class TestCarbonIngestV21(unittest.TestCase):
                 self.assertGreater(telem[-1][4], 0.0)
             finally:
                 conn.close()
+
+
+class TestPlatformEnvAndRuntimeParity(unittest.TestCase):
+    def test_bidirectional_platform_env_and_parity_drift_detection(self) -> None:
+        env_keys = (
+            "AETHER_FLASH_SHUNT",
+            "NEXUS_FLASH_SHUNT",
+            "AETHER_MIN_MODEL",
+            "NEXUS_MIN_MODEL",
+            "AETHER_REASONING_EFFORT",
+            "NEXUS_REASONING_EFFORT",
+            "AETHER_VERTEX_MODEL",
+            "NEXUS_VERTEX_MODEL",
+            "AETHER_STAGE0_VAULT_DB",
+            "ALPHA_MCP_VAULT_DB",
+            "AETHER_CLOUD_MCP_URL",
+            "ALPHA_MCP_CLOUD_URL",
+        )
+        saved = {k: os.environ.get(k) for k in env_keys}
+        try:
+            for k in env_keys:
+                os.environ.pop(k, None)
+            self.assertTrue(srv_mod.is_flash_shunt_engaged())
+            self.assertEqual(srv_mod.get_min_model(), "gemini-4-hydrogen-xhigh")
+            self.assertEqual(srv_mod.get_reasoning_effort(), "high")
+            self.assertEqual(srv_mod.get_vertex_model(), "gemini-4-carbon")
+            self.assertEqual(srv_mod.get_cloud_mcp_url(), "https://alpha-mcp-mxnmqsr7gq-ue.a.run.app/mcp")
+
+            # Verify AETHER_* fallbacks
+            os.environ["AETHER_FLASH_SHUNT"] = "0"
+            os.environ["AETHER_MIN_MODEL"] = "gemini-4-neon-high"
+            os.environ["AETHER_REASONING_EFFORT"] = "xhigh"
+            os.environ["AETHER_VERTEX_MODEL"] = "gemini-4-neon"
+            os.environ["AETHER_STAGE0_VAULT_DB"] = "./custom_aether_vault.sqlite3"
+            os.environ["AETHER_CLOUD_MCP_URL"] = "https://custom-aether.example.com/mcp"
+            self.assertFalse(srv_mod.is_flash_shunt_engaged())
+            self.assertEqual(srv_mod.get_min_model(), "gemini-4-neon-high")
+            self.assertEqual(srv_mod.get_reasoning_effort(), "xhigh")
+            self.assertEqual(srv_mod.get_vertex_model(), "gemini-4-neon")
+            self.assertEqual(srv_mod.get_stage0_vault_db(), "./custom_aether_vault.sqlite3")
+            self.assertEqual(srv_mod.get_cloud_mcp_url(), "https://custom-aether.example.com/mcp")
+
+            # Verify NEXUS_*/ALPHA_MCP_* overrides
+            os.environ["NEXUS_FLASH_SHUNT"] = "1"
+            os.environ["NEXUS_MIN_MODEL"] = "gemini-4-argon-high"
+            os.environ["NEXUS_REASONING_EFFORT"] = "medium"
+            os.environ["NEXUS_VERTEX_MODEL"] = "gemini-4-carbon"
+            os.environ["ALPHA_MCP_VAULT_DB"] = "./custom_alpha_vault.sqlite3"
+            os.environ["ALPHA_MCP_CLOUD_URL"] = "https://custom-alpha.example.com/mcp"
+            self.assertTrue(srv_mod.is_flash_shunt_engaged())
+            self.assertEqual(srv_mod.get_min_model(), "gemini-4-argon-high")
+            self.assertEqual(srv_mod.get_reasoning_effort(), "medium")
+            self.assertEqual(srv_mod.get_vertex_model(), "gemini-4-carbon")
+            self.assertEqual(srv_mod.get_stage0_vault_db(), "./custom_alpha_vault.sqlite3")
+            self.assertEqual(srv_mod.get_cloud_mcp_url(), "https://custom-alpha.example.com/mcp")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        # Verify runtime_parity_ok detects boot vs disk SHA-256 mismatch
+        parity_ok = srv_mod.get_runtime_parity_attestation()
+        self.assertTrue(parity_ok["runtime_parity_ok"])
+        with mock.patch.object(srv_mod, "BOOT_CODE_SHA256", "0" * 64):
+            parity_drift = srv_mod.get_runtime_parity_attestation()
+            self.assertFalse(parity_drift["runtime_parity_ok"])
+            self.assertEqual(parity_drift["boot_code_sha256"], "0" * 64)
+            self.assertEqual(len(parity_drift["disk_code_sha256"]), 64)
 
 
 if __name__ == "__main__":

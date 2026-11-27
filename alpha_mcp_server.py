@@ -50,6 +50,53 @@ MAX_ESCALATION_TOKENS = 6000
 MAX_SKILL_TOKENS = 4500
 MAX_HTTP_BODY_BYTES = 2 * 1024 * 1024
 HOME = Path.home()
+_SERVER_FILE_PATH = Path(__file__).resolve()
+BOOT_CODE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+DEFAULT_CLOUD_MCP_URL = "https://alpha-mcp-mxnmqsr7gq-ue.a.run.app/mcp"
+
+
+def _env_bi(primary: str, secondary: str, default: str = "") -> str:
+    for key in (primary, secondary):
+        val = os.environ.get(key, "").strip()
+        if val:
+            return val
+    return default
+
+
+def is_flash_shunt_engaged() -> bool:
+    return _env_bi("NEXUS_FLASH_SHUNT", "AETHER_FLASH_SHUNT", "1").lower() not in ("0", "false", "no", "off")
+
+
+def get_min_model() -> str:
+    return _env_bi("NEXUS_MIN_MODEL", "AETHER_MIN_MODEL", "gemini-4-hydrogen-xhigh")
+
+
+def get_reasoning_effort() -> str:
+    return _env_bi("NEXUS_REASONING_EFFORT", "AETHER_REASONING_EFFORT", "high")
+
+
+def get_vertex_model() -> str:
+    return _env_bi("NEXUS_VERTEX_MODEL", "AETHER_VERTEX_MODEL", "gemini-4-carbon")
+
+
+def get_stage0_vault_db() -> str:
+    return _env_bi("ALPHA_MCP_VAULT_DB", "AETHER_STAGE0_VAULT_DB", "")
+
+
+def get_cloud_mcp_url() -> str:
+    return _env_bi("ALPHA_MCP_CLOUD_URL", "AETHER_CLOUD_MCP_URL", DEFAULT_CLOUD_MCP_URL)
+
+
+def get_runtime_parity_attestation() -> dict[str, Any]:
+    try:
+        disk_sha = hashlib.sha256(_SERVER_FILE_PATH.read_bytes()).hexdigest()
+    except OSError:
+        disk_sha = ""
+    return {
+        "boot_code_sha256": BOOT_CODE_SHA256,
+        "disk_code_sha256": disk_sha,
+        "runtime_parity_ok": bool(disk_sha) and hmac.compare_digest(BOOT_CODE_SHA256, disk_sha),
+    }
 
 # SEP-1865 MCP App (Alpha MCP Workbench)
 APP_RESOURCE_URI = "ui://alpha-mcp/workbench.html"
@@ -154,6 +201,20 @@ def public_path(raw: str) -> str:
     return ("~" + text[len(home):]).replace("\\", "/") if text.lower().startswith(home.lower()) else text.replace("\\", "/")
 
 
+def get_platform_env_summary() -> dict[str, Any]:
+    vault_raw = get_stage0_vault_db()
+    vault_disp = public_path(str(Path(vault_raw).expanduser())) if vault_raw else "./mcp_alpha_vault.sqlite3"
+    return {
+        "flash_shunt": "1" if is_flash_shunt_engaged() else "0",
+        "flash_shunt_engaged": is_flash_shunt_engaged(),
+        "min_model": get_min_model(),
+        "reasoning_effort": get_reasoning_effort(),
+        "vertex_model": get_vertex_model(),
+        "stage0_vault_db": vault_disp,
+        "cloud_mcp_url": get_cloud_mcp_url(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Across-the-Line Apex Contactor (NEXUS_FLASH_SHUNT=1)
 # ---------------------------------------------------------------------------
@@ -181,7 +242,7 @@ def enforce_apex_shunt(model: str, provider: str = "google") -> tuple[str, bool]
     raw = (model or "").strip()
     if not raw:
         return apex_model, True
-    if _is_low_poly_tier(raw):
+    if is_flash_shunt_engaged() and _is_low_poly_tier(raw):
         return apex_model, True
     return raw, False
 
@@ -436,7 +497,7 @@ def open_vault(db_path: str | None) -> tuple[sqlite3.Connection | None, str]:
         hydrated = _hydrate_gcs_vault_if_configured()
         if hydrated is not None and hydrated.exists():
             return sqlite3.connect(f"file:{hydrated.as_posix()}?mode=ro", uri=True, timeout=3.0), ""
-    explicit = db_path or os.environ.get("ALPHA_MCP_VAULT_DB", "")
+    explicit = db_path or get_stage0_vault_db()
     if explicit:
         target = Path(explicit).expanduser().resolve()
     else:
@@ -487,15 +548,17 @@ def tool_fts_query(query: str, top_k: int = 5, db_path: str | None = None) -> di
 
 
 def tool_manifest_lookup(scope: str = "summary", limit: int = 15, db_path: str | None = None) -> dict[str, Any]:
+    parity_fields = get_runtime_parity_attestation()
     conn, err = open_vault(db_path)
     if conn is None:
-        return {"status": "ERROR", "error": err}
+        return {"status": "ERROR", "error": err, **parity_fields}
     try:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         count = lambda t: int(conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]) if t in tables else 0
         lim = max(1, min(int(limit), 50))
         out: dict[str, Any] = {
             "status": "OK",
+            **parity_fields,
             "scope": scope,
             "counts": {
                 "files": count("files"),
@@ -643,8 +706,15 @@ def tool_edge_route(
 
 
 def tool_vertex_query(prompt: str, model: str = "", max_tokens: int = 512) -> dict[str, Any]:
-    req_model = (model or "").strip() or (os.environ.get("NEXUS_VERTEX_MODEL", "").strip() or APEX_PROVIDER_MODELS["google"])
-    resolved_model, shunt_applied = enforce_apex_shunt(req_model, provider="google")
+    shunt_active = is_flash_shunt_engaged()
+    vertex_default = get_vertex_model()
+    if shunt_active and _is_low_poly_tier(vertex_default):
+        vertex_default = "gemini-4-carbon"
+    req_model = (model or "").strip() or vertex_default
+    if shunt_active and _is_low_poly_tier(req_model):
+        resolved_model, shunt_applied = vertex_default, True
+    else:
+        resolved_model, shunt_applied = req_model, False
     if shunt_applied:
         with _STATE_LOCK:
             _TELEMETRY["apex_shunts_applied"] += 1
@@ -743,7 +813,7 @@ def tool_apex_contactor_route_packet(
     return {
         "status": "ROUTED",
         "contactor_mode": "ACROSS_THE_LINE_APEX",
-        "flash_shunt_engaged": True,
+        "flash_shunt_engaged": is_flash_shunt_engaged(),
         "env_invariant": "NEXUS_FLASH_SHUNT=1",
         "provider": prov,
         "requested_model": requested_model,
@@ -755,7 +825,8 @@ def tool_apex_contactor_route_packet(
         "packet_sha256": packet_sha256,
         "escalation_packet": {
             "lod_tier": "LOD_1_ESCALATION",
-            "reasoning_effort": os.environ.get("NEXUS_REASONING_EFFORT", "high"),
+            "min_model": get_min_model(),
+            "reasoning_effort": get_reasoning_effort(),
             "objective": capped_obj,
         },
     }
@@ -970,18 +1041,22 @@ def tool_sovereign_dual_modality_status() -> dict[str, Any]:
         "status": "OK",
         "server": SERVER_NAME,
         "version": SERVER_VERSION,
+        **get_runtime_parity_attestation(),
         "transports": ["stdio", "http"],
         "pinned_tool_order": [t["name"] for t in TOOLS],
         "sep2640_skills": _skill_manifest_summaries(),
         "a2a_agent_card_signature": card["signature"]["prefix"],
         "protocol_versions": list(SUPPORTED_PROTOCOL_VERSIONS),
+        "cloud_mcp_url": get_cloud_mcp_url(),
+        "platform_env": get_platform_env_summary(),
         "redaction_patterns_count": len(REDACTIONS),
         "secret_path_airlock": True,
-        "flash_shunt_engaged": True,
+        "flash_shunt_engaged": is_flash_shunt_engaged(),
         "equations_count": len(EQUATIONS_VAULT),
         "keyless_gcp": {
             "project_configured": bool(os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()),
             "impersonation_configured": bool(os.environ.get("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT", "").strip()),
+            "vertex_model": get_vertex_model(),
             "static_key_files_on_disk": 0,
         },
         "zero_cost_online_tiers": list(ZERO_COST_ONLINE_TIERS),
@@ -1067,7 +1142,7 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": _schema(
             {
                 "prompt": {"type": "string"},
-                "model": {"type": "string", "default": "gemini-4-neon"},
+                "model": {"type": "string", "default": "gemini-4-carbon"},
                 "max_tokens": {"type": "integer", "default": 512},
             },
             ["prompt"],
@@ -2205,9 +2280,12 @@ class AlphaMCPHTTPHandler(http.server.BaseHTTPRequestHandler):
                     "status": "ONLINE",
                     "server": SERVER_NAME,
                     "version": SERVER_VERSION,
+                    **get_runtime_parity_attestation(),
                     "mcp_endpoint": f"{base}/mcp",
+                    "cloud_mcp_url": get_cloud_mcp_url(),
+                    "platform_env": get_platform_env_summary(),
                     "tools_count": len(TOOLS),
-                    "flash_shunt_engaged": True,
+                    "flash_shunt_engaged": is_flash_shunt_engaged(),
                     "require_auth": bool(self.server.require_auth),  # type: ignore[attr-defined]
                     "oauth_login_mode": _oauth_default_mode(),
                     "transports": ["stdio", "http"],
@@ -2752,12 +2830,13 @@ def selftest() -> int:
         assert resp is not None and "result" in resp, f"Unexpected tool response for {name}: {resp}"
         return resp["result"]
 
-    # 1. Initialize & capabilities
-    init_resp = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}})
-    assert init_resp is not None
-    assert init_resp["result"]["protocolVersion"] == "2026-07-28"
-    assert init_resp["result"]["serverInfo"]["version"] == "2.0.0"
-    assert init_resp["result"]["capabilities"]["tools"]["listChanged"] is False
+    # 1. Initialize & 5-version protocol matrix
+    for pver in ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"):
+        init_resp = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": pver}})
+        assert init_resp is not None
+        assert init_resp["result"]["protocolVersion"] == pver
+        assert init_resp["result"]["serverInfo"]["version"] == "2.0.0"
+        assert init_resp["result"]["capabilities"]["tools"]["listChanged"] is False
 
     # 2. Prefix-pinned 10-tool wire order
     expected_order = [
@@ -2818,9 +2897,14 @@ def selftest() -> int:
     assert interp_ok["state"] == "completed" and interp_ok["taintProvenance"] == "VERIFIED_ARCHITECT"
     assert len(interp_ok["artifact"]["signature"]) == 64
 
-    # 9. Status tool, Resources, Prompts (nil-arg resilient), Equations
+    # 9. Status tool, Manifest Parity, Resources, Prompts (nil-arg resilient), Equations
     status_obj = json.loads(call("sovereign_dual_modality_status", {})["content"][0]["text"])
     assert status_obj["version"] == "2.0.0" and len(status_obj["pinned_tool_order"]) == 10
+    assert status_obj["boot_code_sha256"] == BOOT_CODE_SHA256 and status_obj["runtime_parity_ok"] is True
+    manifest_obj = json.loads(call("stage0_vault_manifest_lookup", {"scope": "summary"})["content"][0]["text"])
+    assert manifest_obj["boot_code_sha256"] == BOOT_CODE_SHA256
+    assert manifest_obj["disk_code_sha256"] == BOOT_CODE_SHA256
+    assert manifest_obj["runtime_parity_ok"] is True
     assert len(status_obj["sep2640_skills"]) == 3 and status_obj["redaction_patterns_count"] == 13
     assert len(EQUATIONS_VAULT) == 19
     res_list = handle({"jsonrpc": "2.0", "id": 2, "method": "resources/list"})
@@ -2829,8 +2913,10 @@ def selftest() -> int:
     assert app_res is not None and "result" in app_res, app_res
     app_item = app_res["result"]["contents"][0]
     assert app_item["mimeType"] == APP_MIME_TYPE and "<!DOCTYPE html>" in app_item["text"]
-    prompt_resp = handle({"jsonrpc": "2.0", "id": 3, "method": "prompts/get", "params": {"name": "kppc_lod_blueprint"}})
-    assert prompt_resp is not None and "result" in prompt_resp and prompt_resp["result"]["messages"]
+    for pname in ("kppc_lod_blueprint", "exodia_zero_drag_audit", "zero_cost_online_deploy"):
+        for pparams in ({"name": pname}, {"name": pname, "arguments": None}, {"name": pname, "arguments": {}}):
+            prompt_resp = handle({"jsonrpc": "2.0", "id": 3, "method": "prompts/get", "params": pparams})
+            assert prompt_resp is not None and "result" in prompt_resp and prompt_resp["result"]["messages"]
 
     # 10. 13-pattern credential redaction probe (runtime concatenation only)
     probe_raw = " ".join([
@@ -2866,7 +2952,11 @@ def selftest() -> int:
     try:
         base = f"http://127.0.0.1:{port}"
         st, _h, body = _http_probe(f"{base}/health")
-        assert st == 200 and json.loads(body)["status"] == "ONLINE"
+        health_json = json.loads(body)
+        assert st == 200 and health_json["status"] == "ONLINE"
+        assert health_json["boot_code_sha256"] == BOOT_CODE_SHA256
+        assert health_json["disk_code_sha256"] == BOOT_CODE_SHA256
+        assert health_json["runtime_parity_ok"] is True
         st, _h, body = _http_probe(f"{base}/.well-known/agent-card.json")
         assert st == 200 and json.loads(body)["signature"]["alg"] == "HS256-SOVEREIGN"
         st, _h, _b = _http_probe(f"{base}/mcp", method="GET")
