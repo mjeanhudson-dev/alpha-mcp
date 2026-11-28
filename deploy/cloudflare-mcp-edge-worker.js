@@ -1,14 +1,21 @@
 /**
- * Aether Sovereign Cloud MCP Edge Router (Cloudflare Worker, zero dependencies).
+ * Aether Sovereign Apex Cloud MCP Edge Router (Cloudflare Worker, zero dependencies).
  * Author: Eloquent (@mjeanhudson-dev)
  *
- * Binds https://mcp.eloquentwin.com/* -> Google Cloud Run (us-east1, $0/mo scale-to-zero)
- * with optional <800ms live-workstation tunnel upgrade when WORKSTATION_MCP_ORIGIN is set.
- * Preserves OAuth 2.1 PKCE S256, RFC 9728 discovery, A2A v1.0.1 cards, and X-Forwarded-Host.
+ * Routes https://mcp.eloquentwin.com/* -> Aether Sovereign Apex MCP v6.0.0-coalesced (12 tools + 5 slash prompts)
+ * and https://mcp.eloquentwin.com/alpha/* -> Alpha MCP v2.0.0 (10 tools), with <800ms workstation tunnel priority
+ * and lossless legacy tool-alias translation.
  */
 
-const DEFAULT_CLOUD_RUN_ORIGIN = 'https://alpha-mcp-mxnmqsr7gq-ue.a.run.app';
+const DEFAULT_SOVEREIGN_APEX_ORIGIN = 'https://aether-sovereign-apex-mxnmqsr7gq-ue.a.run.app';
+const DEFAULT_ALPHA_MCP_ORIGIN = 'https://alpha-mcp-mxnmqsr7gq-ue.a.run.app';
 const WORKSTATION_TIMEOUT_MS = 800;
+
+const LEGACY_TOOL_ALIASES = {
+  sovereign_dual_modality_status: 'aether_v5_triprotocol_status',
+  interpolate_state_sheet: 'aether_interpolate_state_sheet',
+  tandem_edge_route: 'aether_tandem_edge_route',
+};
 
 function buildUpstreamHeaders(request, publicHost) {
   const headers = new Headers();
@@ -34,45 +41,68 @@ function buildUpstreamHeaders(request, publicHost) {
   return headers;
 }
 
-async function forwardToOrigin(request, originBase, publicHost, timeoutMs) {
-  const incomingUrl = new URL(request.url);
-  const targetUrl = new URL(incomingUrl.pathname + incomingUrl.search, originBase);
+async function maybeNormalizeJsonRpcBody(request) {
+  if (request.method.toUpperCase() !== 'POST') return null;
+  const ct = (request.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('application/json')) return request.arrayBuffer();
+  const buf = await request.arrayBuffer();
+  try {
+    const txt = new TextDecoder().decode(buf);
+    const obj = JSON.parse(txt);
+    if (obj && obj.method === 'tools/call' && obj.params && typeof obj.params.name === 'string') {
+      const mapped = LEGACY_TOOL_ALIASES[obj.params.name];
+      if (mapped) {
+        obj.params.name = mapped;
+        return new TextEncoder().encode(JSON.stringify(obj)).buffer;
+      }
+    }
+  } catch {}
+  return buf;
+}
+
+async function forwardToOrigin(request, originBase, targetPathAndSearch, publicHost, bodyBuf, timeoutMs) {
+  const targetUrl = new URL(targetPathAndSearch, originBase);
   const method = request.method.toUpperCase();
   const hasBody = method !== 'GET' && method !== 'HEAD';
-  const init = {
+  return fetch(targetUrl.toString(), {
     method,
     headers: buildUpstreamHeaders(request, publicHost),
-    body: hasBody ? request.body : undefined,
+    body: hasBody ? (bodyBuf ? bodyBuf.slice(0) : request.body) : undefined,
     redirect: 'manual',
     signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
-  };
-  return fetch(targetUrl.toString(), init);
+  });
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const publicHost = url.host || 'mcp.eloquentwin.com';
-    const cloudOrigin = (env && env.CLOUD_RUN_MCP_ORIGIN) || DEFAULT_CLOUD_RUN_ORIGIN;
+    const apexOrigin = (env && env.CLOUD_RUN_MCP_ORIGIN) || DEFAULT_SOVEREIGN_APEX_ORIGIN;
+    const alphaOrigin = (env && env.ALPHA_MCP_ORIGIN) || DEFAULT_ALPHA_MCP_ORIGIN;
     const wsOrigin = env && env.WORKSTATION_MCP_ORIGIN ? String(env.WORKSTATION_MCP_ORIGIN).trim() : '';
 
-    // Optional Hybrid Mode: try live workstation tunnel first on /mcp calls; auto-failover to Cloud Run in <800ms
-    if (wsOrigin && (url.pathname === '/mcp' || url.pathname === '/mcp/')) {
-      const buffered = request.method !== 'GET' && request.method !== 'HEAD' ? await request.arrayBuffer() : null;
-      const makeReq = () => new Request(request.url, {
-        method: request.method,
-        headers: request.headers,
-        body: buffered ? buffered.slice(0) : undefined,
-      });
-      try {
-        const wsResp = await forwardToOrigin(makeReq(), wsOrigin, publicHost, WORKSTATION_TIMEOUT_MS);
-        if (wsResp.status < 502) return wsResp;
-      } catch {
-        // Workstation asleep or tunnel offline -> seamless Cloud Run failover
-      }
-      return forwardToOrigin(makeReq(), cloudOrigin, publicHost, 30000);
+    if (url.pathname === '/alpha' || url.pathname.startsWith('/alpha/')) {
+      const subPath = (url.pathname.slice(6) || '/') + url.search;
+      const bodyBuf = request.method !== 'GET' && request.method !== 'HEAD' ? await request.arrayBuffer() : null;
+      return forwardToOrigin(request, alphaOrigin, subPath, publicHost, bodyBuf, 30000);
     }
 
-    return forwardToOrigin(request, cloudOrigin, publicHost, 30000);
+    const normPath = (url.pathname === '/apex' || url.pathname.startsWith('/apex/'))
+      ? ((url.pathname.slice(5) || '/') + url.search)
+      : (url.pathname + url.search);
+
+    const isMcpPost = normPath.startsWith('/mcp');
+    const buffered = request.method !== 'GET' && request.method !== 'HEAD'
+      ? (isMcpPost ? await maybeNormalizeJsonRpcBody(request) : await request.arrayBuffer())
+      : null;
+
+    if (wsOrigin && (url.pathname === '/mcp' || url.pathname === '/mcp/')) {
+      try {
+        const wsResp = await forwardToOrigin(request, wsOrigin, normPath, publicHost, buffered, WORKSTATION_TIMEOUT_MS);
+        if (wsResp.status < 502) return wsResp;
+      } catch {}
+    }
+
+    return forwardToOrigin(request, apexOrigin, normPath, publicHost, buffered, 30000);
   },
 };
