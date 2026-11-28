@@ -209,6 +209,10 @@ class TestStdioModalityE2E(unittest.TestCase):
         self.assertEqual(app_item["mimeType"], "text/html;profile=mcp-app")
         self.assertIn("<!DOCTYPE html>", app_item["text"])
         self.assertLess(len(app_item["text"].encode("utf-8")), 10 * 1024 * 1024)
+        self.assertIn("aether_v5_triprotocol_status", app_item["text"])
+        self.assertIn("sovereign_dual_modality_status", app_item["text"])
+        self.assertIn("aether_tandem_edge_route", app_item["text"])
+        self.assertIn("simulated_cache_reads", app_item["text"])
         status_meta = next(t for t in tools if t["name"] == "sovereign_dual_modality_status")["_meta"]
         self.assertEqual(status_meta["ui"]["resourceUri"], "ui://alpha-mcp/workbench.html")
         self.assertEqual(

@@ -7,16 +7,33 @@ import { z } from "zod";
 
 type Json = Record<string, any>;
 type Tab = "search" | "manifest" | "slice" | "sovereign";
+type Flavor = "aether" | "alpha";
 
 const TOOL_TAB: Record<string, Tab> = {
   stage0_vault_fts_query: "search",
   stage0_vault_manifest_lookup: "manifest",
   stage0_ast_slice_and_parity: "slice",
   sovereign_dual_modality_status: "sovereign",
+  aether_v5_triprotocol_status: "sovereign",
   exodia_compaction_gate: "sovereign",
   tandem_edge_route: "sovereign",
+  aether_tandem_edge_route: "sovereign",
   apex_contactor_route_packet: "sovereign",
 };
+
+const STATE_KEY: Record<string, string> = {
+  aether_v5_triprotocol_status: "sovereign_dual_modality_status",
+  aether_tandem_edge_route: "tandem_edge_route",
+};
+
+const ALPHA_ONLY_TOOLS = new Set([
+  "sovereign_dual_modality_status",
+  "tandem_edge_route",
+  "interpolate_state_sheet",
+]);
+
+const isToolMissingErr = (msg: string) =>
+  /not found on mcp server|unknown tool|tool .* not found/i.test(msg);
 
 const app = new App({ name: "Alpha MCP Workbench", version: "2.0.0" }, {});
 const state: { tab: Tab; data: Partial<Record<string, Json>>; loading: string } = {
@@ -24,9 +41,22 @@ const state: { tab: Tab; data: Partial<Record<string, Json>>; loading: string } 
   data: {},
   loading: "",
 };
+let flavor: Flavor = "aether";
 let caps: Json = {};
 let gotResult = false;
 let statusMsg = "";
+
+function syncFlavorFromContext(ctx: any) {
+  const toolName = String(ctx?.toolInfo?.tool?.name ?? "");
+  if (ALPHA_ONLY_TOOLS.has(toolName)) flavor = "alpha";
+  else if (toolName.startsWith("aether_")) flavor = "aether";
+}
+
+function syncFlavorFromData(d: Json | null) {
+  if (!d || !Array.isArray(d.pinned_tool_order)) return;
+  if (d.pinned_tool_order.includes("aether_v5_triprotocol_status")) flavor = "aether";
+  else if (d.pinned_tool_order.includes("sovereign_dual_modality_status")) flavor = "alpha";
+}
 
 const root = document.getElementById("root")!;
 
@@ -47,17 +77,42 @@ function extract(result: any): Json | null {
   return null;
 }
 
-async function call(name: string, args: Json): Promise<Json | null> {
+async function invokeTool(name: string, args: Json): Promise<Json> {
+  const res = await app.callServerTool({ name, arguments: args });
+  const data = extract(res);
+  const rawText = String(res?.content?.[0]?.text ?? "");
+  const errText = String(data?.error ?? data?.message ?? (res?.isError ? rawText : ""));
+  if (errText && isToolMissingErr(errText)) throw new Error(errText);
+  return data ?? (res?.isError ? { status: "ERROR", error: rawText || "tool error" } : { status: "ERROR", error: "empty result" });
+}
+
+async function call(name: string, args: Json, fallbackName?: string): Promise<Json | null> {
+  const storeKey = STATE_KEY[name] ?? name;
   state.loading = name;
   render();
   try {
-    const res = await app.callServerTool({ name, arguments: args });
-    const data = extract(res) ?? { status: "ERROR", error: "empty result" };
-    state.data[name] = data;
+    let actualName = name;
+    let data: Json;
+    try {
+      data = await invokeTool(actualName, args);
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      if (fallbackName && isToolMissingErr(msg)) {
+        actualName = fallbackName;
+        flavor = actualName.startsWith("aether_") ? "aether" : "alpha";
+        state.loading = actualName;
+        render();
+        data = await invokeTool(actualName, args);
+      } else {
+        throw err;
+      }
+    }
+    syncFlavorFromData(data);
+    state.data[STATE_KEY[actualName] ?? storeKey] = data;
     return data;
   } catch (e: any) {
     const data = { status: "ERROR", error: String(e?.message ?? e) };
-    state.data[name] = data;
+    state.data[storeKey] = data;
     return data;
   } finally {
     state.loading = "";
@@ -107,7 +162,10 @@ function viewManifest() {
     .join("")}</div>
   ${d?.status === "ERROR" ? `<div class="err">${esc(d.error)}</div>` : ""}
   <div class="kpis">${["files", "slices", "links", "vhdx_entries", "zip_entries", "secret_audit_hits"]
-    .map((k) => `<div class="card kpi"><span class="muted">${k}</span><b>${esc(c[k] ?? "–")}</b></div>`)
+    .map((k) => {
+      const v = k === "slices" ? (c.slices ?? c.slices_160L) : c[k];
+      return `<div class="card kpi"><span class="muted">${k}</span><b>${esc(v ?? "–")}</b></div>`;
+    })
     .join("")}</div>
   ${
     rows.length
@@ -126,15 +184,20 @@ function viewSlice() {
   if (d?.code === "SECRET_PATH_AIRLOCK_DENY" || d?.status === "ERROR") {
     body = `<div class="card err"><b>${esc(d.code ?? "ERROR")}</b> ${esc(d.error ?? d.message ?? "")}</div>`;
   } else if (d) {
-    const text = String(d.content ?? d.slice ?? d.text ?? "");
+    const preNumbered = String(d.lod2_slice ?? d.slice ?? "");
+    const rawContent = String(d.content ?? d.text ?? "");
     const start = Number(d.start_line ?? 1);
-    const numbered = text
-      .split("\n")
-      .map((l, i) => `${String(start + i).padStart(5)}  ${l}`)
-      .join("\n");
+    const rendered = preNumbered
+      ? preNumbered
+      : rawContent
+        ? rawContent
+            .split("\n")
+            .map((l, i) => `${String(start + i).padStart(5)}  ${l}`)
+            .join("\n")
+        : String(d.receipt ?? "");
     const parity = d.parity ?? d.status ?? "";
     body = `<div class="muted">${d.sha256 ? `<span class="badge">${esc(parity)}</span> sha256 ${esc(String(d.sha256).slice(0, 16))}` : esc(parity)}</div>
-    ${text ? `<pre>${esc(numbered)}</pre>` : jsonBlock(d)}`;
+    ${rendered ? `<pre>${esc(rendered)}</pre>` : jsonBlock(d)}`;
   }
   return `
   <div class="row"><input type="text" id="fp" placeholder="file path" value="${inp("fp", "")}">
@@ -255,24 +318,36 @@ function bind() {
   root.querySelectorAll<HTMLElement>("[data-run]").forEach((b) =>
     b.addEventListener("click", () => {
       const run = b.dataset.run;
-      if (run === "exodia")
-        void call("exodia_compaction_gate", {
-          cache_reads: Number(val("cr")) || 0,
-          cache_writes: Number(val("cw")) || 1,
-          turns: Number(val("tn")) || 0,
-        });
-      else if (run === "tandem")
-        void call("tandem_edge_route", {
+      if (run === "exodia") {
+        const cr = Number(val("cr")) || 0;
+        const cw = Number(val("cw")) || 1;
+        const tn = Number(val("tn")) || 0;
+        void call(
+          "exodia_compaction_gate",
+          flavor === "aether"
+            ? { simulated_cache_reads: cr, simulated_cache_writes: cw }
+            : { cache_reads: cr, cache_writes: cw, turns: tn },
+        );
+      } else if (run === "tandem") {
+        const args = {
+          task_type: "thermal_audit",
           phone_temp_c: Number(val("pt")) || 34,
           vram_used_gb: Number(val("vu")) || 3.5,
-        });
-      else if (run === "apex")
+        };
+        void call(
+          flavor === "alpha" ? "tandem_edge_route" : "aether_tandem_edge_route",
+          args,
+          flavor === "alpha" ? "aether_tandem_edge_route" : "tandem_edge_route",
+        );
+      } else if (run === "apex") {
         void call("apex_contactor_route_packet", { requested_model: val("rm"), objective: val("ob") });
+      }
     }),
   );
 }
 
 function applyHost(ctx: any) {
+  syncFlavorFromContext(ctx);
   if (ctx?.theme) applyDocumentTheme(ctx.theme);
   if (ctx?.styles?.variables) applyHostStyleVariables(ctx.styles.variables);
 }
@@ -287,9 +362,10 @@ app.ontoolresult = (result: any) => {
   state.loading = "";
   const data = extract(result);
   if (!data) return render();
+  syncFlavorFromData(data);
   const name = guessTool(data);
   if (name) {
-    state.data[name] = data;
+    state.data[STATE_KEY[name] ?? name] = data;
     state.tab = TOOL_TAB[name];
   }
   statusMsg = "";
@@ -305,9 +381,18 @@ app.onhostcontextchanged = applyHost;
 function guessTool(d: Json): string | null {
   if (Array.isArray(d.hits)) return "stage0_vault_fts_query";
   if (d.counts && d.scope) return "stage0_vault_manifest_lookup";
-  if (d.pinned_tool_order && d.version) return "sovereign_dual_modality_status";
+  if (Array.isArray(d.pinned_tool_order) && d.version) return "sovereign_dual_modality_status";
   if (d.sha256 || d.code === "SECRET_PATH_AIRLOCK_DENY" || d.start_line !== undefined) return "stage0_ast_slice_and_parity";
-  if (d.last_exodia_ratio !== undefined || d.exodia_state !== undefined || d.compact !== undefined) return "exodia_compaction_gate";
+  if (
+    d.last_exodia_ratio !== undefined ||
+    d.exodia_state !== undefined ||
+    d.compact !== undefined ||
+    d.compact_required !== undefined ||
+    d.compaction_triggered !== undefined
+  )
+    return "exodia_compaction_gate";
+  if (d.eq06_quintic_governor || d.thermal_governor || d.status === "STAGE05_ROUTED") return "tandem_edge_route";
+  if (d.resolved_apex_model || d.contactor_mode === "ACROSS_THE_LINE_APEX") return "apex_contactor_route_packet";
   return null;
 }
 
@@ -320,7 +405,11 @@ async function main() {
 
   if (!gotResult) {
     await Promise.all([
-      call("sovereign_dual_modality_status", {}),
+      call(
+        flavor === "alpha" ? "sovereign_dual_modality_status" : "aether_v5_triprotocol_status",
+        {},
+        flavor === "alpha" ? "aether_v5_triprotocol_status" : "sovereign_dual_modality_status",
+      ),
       call("stage0_vault_manifest_lookup", { scope: "summary", limit: 15 }),
     ]);
   }
